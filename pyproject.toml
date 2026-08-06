@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling==1.28.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "a-share-quant"
+version = "0.1.0"
+description = "A-share quantitative research and simulation sandbox"
+requires-python = ">=3.11,<3.12"
+classifiers = ["Operating System :: POSIX"]
+dependencies = [
+    "akshare==1.18.64",
+    "backtrader==1.9.78.123",
+    "pandas==3.0.3",
+    "pyarrow==25.0.0",
+    "PyYAML==6.0.3",
+    "requests==2.34.2",
+]
+
+[project.scripts]
+aquant-data = "aquant.cli:main"
+aquant-backtest = "aquant.backtest_cli:main"
+aquant-report = "aquant.report_cli:main"
+aquant-experiment = "aquant.experiment_cli:main"
+aquant-release = "aquant.release_cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest==9.0.2",
+    "ruff==0.14.13",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aquant"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+    "integration: explicit full frozen-release reconstruction",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["aquant"]

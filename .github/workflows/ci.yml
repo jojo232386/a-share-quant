@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out submitted revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      - name: Check lockfile
+        run: uv lock --check
+
+      - name: Check committed whitespace
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE_SHA" ;;
+            push) base="$PUSH_BEFORE_SHA" ;;
+            workflow_dispatch) base="origin/$DEFAULT_BRANCH" ;;
+            *) echo "unsupported GitHub event: $EVENT_NAME" >&2; exit 2 ;;
+          esac
+          ./scripts/check_committed_whitespace.sh "$base" "$HEAD_SHA"
+
+      - name: Test CI helper scripts
+        run: tests/scripts/test_check_committed_whitespace.sh
+
+      - name: Run unit and integration tests
+        run: uv run --no-sync pytest -q
+
+      - name: Lint
+        run: uv run --no-sync ruff check .
+
+      - name: Build wheel
+        run: uv build

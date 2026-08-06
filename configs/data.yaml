@@ -1,0 +1,6 @@
+pipeline:
+  universe_id: bba6760fa738a829bb09a72f0c90919aeba02429018b8fd189c65e2d6c82a20e
+  start: "2018-01-01"
+  end: latest_complete_trading_day
+  adjust: ""
+  mode: research_approx
