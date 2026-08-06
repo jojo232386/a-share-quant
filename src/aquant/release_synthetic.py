@@ -136,23 +136,31 @@ def _market_frame(symbol: str, sessions: tuple[date, ...]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _fixture_actions(symbol: str, kind: InstrumentKind) -> tuple[CorporateActionEvent, ...]:
+def _fixture_actions(
+    symbol: str,
+    kind: InstrumentKind,
+    sessions: tuple[date, ...],
+) -> tuple[CorporateActionEvent, ...]:
     if symbol not in {"000001", "510300", "600519", "601318"}:
         return ()
-    ex_date = {
+    requested_ex_date = {
         "000001": date(2020, 6, 15),
         "510300": date(2021, 7, 12),
         "600519": date(2022, 8, 22),
         "601318": date(2023, 9, 18),
     }[symbol]
+    ex_index = next(
+        index for index, session in enumerate(sessions) if session >= requested_ex_date
+    )
+    ex_date = sessions[ex_index]
     return (
         CorporateActionEvent.create(
             symbol=symbol,
             instrument_kind=kind,
-            announcement_date=ex_date - timedelta(days=7),
-            record_date=ex_date - timedelta(days=3),
+            announcement_date=sessions[ex_index - 2],
+            record_date=sessions[ex_index - 1],
             ex_date=ex_date,
-            payable_date=ex_date + timedelta(days=5),
+            payable_date=sessions[ex_index + 2],
             cash_dividend_per_unit=Decimal("0.10"),
             stock_dividend_ratio=Decimal("0"),
             capitalization_ratio=Decimal("0"),
@@ -259,7 +267,7 @@ def build_public_v01_inputs(release_root: Path) -> PublicV01Inputs:
         )
         action = publish_corporate_actions(
             inputs_root,
-            _fixture_actions(symbol, kind),
+            _fixture_actions(symbol, kind, sessions),
             symbol=symbol,
             instrument_kind=kind,
             provider=PUBLIC_FIXTURE_SCHEMA,

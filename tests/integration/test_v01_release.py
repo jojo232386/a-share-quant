@@ -27,8 +27,8 @@ def test_rebuilds_complete_v01_release_from_frozen_inputs():
     assert summary.candidate_run_count == 30
     assert summary.replay_row_count == 100
     assert summary.risk_report_id == (
-        "226bf973d6211f4ca80d464a0dff19e96dbfd1e660a51f966efffcb32009f389"
+        "aa0c944a959796726bb7d394561fa6caa9524f32b4f86d16fb19354099932607"
     )
     assert summary.week5_experiment_id == (
-        "8f7ca7cce348d376165b6bd319d3efa262adff86c0be377ce7b3ed72c511b1db"
+        "20ace094094275e1c83e2f0338e46e8c42d283293bfb9be60b5b758e322ea6da"
     )

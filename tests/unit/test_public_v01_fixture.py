@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date
 from pathlib import Path
 
@@ -8,6 +9,10 @@ import pandas as pd
 
 from aquant.backtest.data_access import load_verified_snapshot
 from aquant.data import SourceSchema
+from aquant.data.corporate_actions import (
+    load_verified_corporate_actions,
+    read_corporate_action_manifest,
+)
 from aquant.data.manifest import ManifestWriter
 from aquant.release_synthetic import (
     PUBLIC_FIXTURE_SCHEMA,
@@ -77,6 +82,20 @@ def test_public_fixture_inputs_are_deterministic_auditable_and_not_market_data(t
     assert all(record.actual_end == date(2026, 7, 24) for record in records)
     assert all(record.row_count < left.calendar_row_count for record in records)
     assert sum(left.calendar_row_count - record.row_count for record in records) == 28
+
+    calendar_document = next(
+        (tmp_path / "left" / "inputs" / "data" / "calendars").glob("*.json")
+    )
+    calendar_dates = {
+        date.fromisoformat(value)
+        for value in json.loads(calendar_document.read_text(encoding="utf-8"))["dates"]
+    }
+    action_records = read_corporate_action_manifest(tmp_path / "left" / "inputs")
+    assert all(
+        event.payable_date in calendar_dates
+        for record in action_records
+        for event in load_verified_corporate_actions(tmp_path / "left" / "inputs", record).events
+    )
 
     first = records[0]
     frame = pd.read_parquet(tmp_path / "left" / "inputs" / first.snapshot_relative_path)

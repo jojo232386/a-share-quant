@@ -30,7 +30,7 @@ uv run --no-sync aquant-experiment --help
 uv run --no-sync aquant-release --help
 ```
 
-冻结的 v0.1 发布夹具随对应发布审计包提供时，可执行：
+仓库已包含确定性生成的合成 v0.1 发布夹具，可执行：
 
 ```bash
 ./scripts/verify_v01.sh
