@@ -10,7 +10,6 @@ import os
 import re
 import secrets
 import stat
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +21,8 @@ from aquant.gate_e.config import GateEConfigError, load_gate_e_config
 from aquant.gate_e.environment import (
     GateEEnvironmentError,
     inspect_project_wheel,
+    snapshot_python_runtime,
+    snapshot_uv_runtime,
     verify_wheelhouse,
 )
 
@@ -124,6 +125,8 @@ class GateETrustEvidence:
     uv_lock: Path
     python_executable: Path
     uv_executable: Path
+    expected_python_snapshot: dict[str, object]
+    expected_uv_snapshot: dict[str, object]
     wheelhouse_root: Path
     wheelhouse_manifest: Path
     v01_tag_commit: str
@@ -292,6 +295,8 @@ def _validate_evidence(evidence: GateETrustEvidence) -> None:
     if (
         _COMMIT_RE.fullmatch(evidence.implementation_commit) is None
         or _COMMIT_RE.fullmatch(evidence.v01_tag_commit) is None
+        or type(evidence.expected_python_snapshot) is not dict
+        or type(evidence.expected_uv_snapshot) is not dict
         or any(
             not isinstance(getattr(evidence, field), Path)
             for field in (
@@ -418,113 +423,6 @@ def _validate_candidate_review_snapshot(
         != snapshot.project_wheel.get("sha256")
     ):
         raise GateETrustError("candidate_review_mismatch")
-
-
-def _python_snapshot(path: Path) -> dict[str, object]:
-    content, metadata = _read_regular(
-        path,
-        code="python_mismatch",
-        maximum_bytes=_MAX_FILE_BYTES,
-        allow_parent_alias=True,
-    )
-    try:
-        completed = subprocess.run(
-            [
-                str(path),
-                "-c",
-                (
-                    "import json,platform,sys;"
-                    "print(json.dumps({"
-                    "'architecture':platform.machine(),"
-                    "'implementation':platform.python_implementation(),"
-                    "'platform':platform.system(),"
-                    "'version':'.'.join(str(value) for value in "
-                    "sys.version_info[:3])"
-                    "},sort_keys=True,separators=(',',':')))"
-                ),
-            ],
-            cwd=path.parent,
-            env={
-                "HOME": "/private/var/empty",
-                "LANG": "C",
-                "LC_ALL": "C",
-                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                "PYTHONNOUSERSITE": "1",
-                "TZ": "Asia/Shanghai",
-            },
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=15,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise GateETrustError("python_mismatch") from exc
-    try:
-        identity = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise GateETrustError("python_mismatch") from exc
-    if (
-        completed.returncode != 0
-        or type(identity) is not dict
-        or set(identity)
-        != {"architecture", "implementation", "platform", "version"}
-        or identity["implementation"] != "CPython"
-        or identity["version"] != "3.11.15"
-        or any(
-            type(identity[field]) is not str or not identity[field]
-            for field in ("architecture", "platform")
-        )
-    ):
-        raise GateETrustError("python_mismatch")
-    return {
-        "architecture": identity["architecture"],
-        "implementation": identity["implementation"],
-        "name": "python",
-        "platform": identity["platform"],
-        "sha256": hashlib.sha256(content).hexdigest(),
-        "size": metadata.st_size,
-        "version": identity["version"],
-    }
-
-
-def _uv_snapshot(path: Path) -> dict[str, object]:
-    content, metadata = _read_regular(
-        path,
-        code="uv_mismatch",
-        maximum_bytes=_MAX_FILE_BYTES,
-    )
-    try:
-        completed = subprocess.run(
-            [str(path), "--version"],
-            cwd=path.parent,
-            env={
-                "HOME": "/private/var/empty",
-                "LANG": "C",
-                "LC_ALL": "C",
-                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                "TZ": "Asia/Shanghai",
-            },
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=15,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise GateETrustError("uv_mismatch") from exc
-    fields = completed.stdout.strip().split()
-    if (
-        completed.returncode != 0
-        or len(fields) < 2
-        or fields[0] != "uv"
-        or _VERSION_RE.fullmatch(fields[1]) is None
-    ):
-        raise GateETrustError("uv_mismatch")
-    return {
-        "name": "uv",
-        "sha256": hashlib.sha256(content).hexdigest(),
-        "size": metadata.st_size,
-        "version": fields[1],
-    }
 
 
 def _wheelhouse_manifest_requirements(
@@ -746,8 +644,18 @@ def _snapshot(evidence: GateETrustEvidence) -> _EvidenceSnapshot:
         evidence.uv_lock,
         code="uv_lock_mismatch",
     )
-    python = _python_snapshot(evidence.python_executable)
-    uv = _uv_snapshot(evidence.uv_executable)
+    try:
+        python = snapshot_python_runtime(evidence.python_executable)
+    except (GateEEnvironmentError, OSError, TypeError, ValueError) as exc:
+        raise GateETrustError("python_mismatch") from exc
+    if python != evidence.expected_python_snapshot:
+        raise GateETrustError("python_mismatch")
+    try:
+        uv = snapshot_uv_runtime(evidence.uv_executable)
+    except (GateEEnvironmentError, OSError, TypeError, ValueError) as exc:
+        raise GateETrustError("uv_mismatch") from exc
+    if uv != evidence.expected_uv_snapshot:
+        raise GateETrustError("uv_mismatch")
     wheelhouse = _wheelhouse_snapshot(
         evidence.wheelhouse_root,
         evidence.wheelhouse_manifest,

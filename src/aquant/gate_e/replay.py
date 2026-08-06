@@ -43,6 +43,8 @@ from aquant.gate_e.environment import (
     install_gate_e_environment,
     make_environment_layout,
     run_sandboxed,
+    snapshot_python_runtime,
+    snapshot_uv_runtime,
     stage_environment_inputs,
     verify_wheelhouse,
     wheelhouse_requirements_from_manifest,
@@ -136,6 +138,7 @@ _CANDIDATE_KEYS = frozenset(
         "project_version",
         "research_boundary",
         "run_id",
+        "runtime",
         "schema_version",
         "trust_created",
         "v01_tag_commit",
@@ -281,6 +284,8 @@ class VerifiedCandidateEvidence:
     uv_lock: Path
     python_executable: Path
     uv_executable: Path
+    runtime_python: dict[str, object]
+    runtime_uv: dict[str, object]
     workspace: Path
     artifact: Path
     payload: dict[str, object]
@@ -297,6 +302,8 @@ class VerifiedCandidateEvidence:
             uv_lock=self.uv_lock,
             python_executable=self.python_executable,
             uv_executable=self.uv_executable,
+            expected_python_snapshot=self.runtime_python,
+            expected_uv_snapshot=self.runtime_uv,
             wheelhouse_root=self.wheelhouse_root,
             wheelhouse_manifest=self.wheelhouse_manifest,
             v01_tag_commit=self.v01_tag_commit,
@@ -999,6 +1006,34 @@ def _verified_wheel_inputs(
     return project, wheelhouse
 
 
+def _capture_runtime_snapshots(
+    replay: GateEReplay,
+) -> dict[str, dict[str, object]]:
+    try:
+        python = snapshot_python_runtime(replay.python_executable)
+        uv = snapshot_uv_runtime(replay.uv_executable)
+    except (GateEEnvironmentError, OSError, TypeError, ValueError) as exc:
+        raise GateEReplayError(
+            "candidate_runtime_changed",
+            cause_code=getattr(exc, "code", None),
+        ) from exc
+    return {"python": python, "uv": uv}
+
+
+def _verify_candidate_runtime(
+    candidate: VerifiedCandidateEvidence,
+) -> dict[str, dict[str, object]]:
+    replay = _replay_from_candidate(candidate)
+    observed = _capture_runtime_snapshots(replay)
+    expected = {
+        "python": candidate.runtime_python,
+        "uv": candidate.runtime_uv,
+    }
+    if observed != expected:
+        raise GateEReplayError("candidate_runtime_changed")
+    return observed
+
+
 def _input_paths(
     config: GateEConfig,
     project_root: Path,
@@ -1652,6 +1687,7 @@ def _candidate_payload(
     accounting: GateEAccountingAudit,
     input_audit: GateEInputAudit,
     evidence_path: Path,
+    runtime: dict[str, dict[str, object]],
 ) -> dict[str, object]:
     artifact_files, row_counts, business = _artifact_evidence(
         artifact,
@@ -1717,7 +1753,8 @@ def _candidate_payload(
         "project_version": "0.2.0",
         "research_boundary": _RESEARCH_BOUNDARY,
         "run_id": run_id,
-        "schema_version": "1.0",
+        "runtime": runtime,
+        "schema_version": "1.1",
         "trust_created": False,
         "v01_tag_commit": replay.v01_tag_commit,
         "wheelhouse": {
@@ -1849,6 +1886,50 @@ def _validate_candidate_progress(value: object) -> None:
         raise GateEReplayError("candidate_evidence_invalid")
 
 
+def _candidate_runtime_payload(
+    value: object,
+) -> tuple[dict[str, object], dict[str, object]]:
+    if type(value) is not dict or set(value) != {"python", "uv"}:
+        raise GateEReplayError("candidate_evidence_invalid")
+    python = value["python"]
+    uv = value["uv"]
+    if (
+        type(python) is not dict
+        or set(python)
+        != {
+            "architecture",
+            "implementation",
+            "name",
+            "platform",
+            "sha256",
+            "size",
+            "version",
+        }
+        or python["name"] != "python"
+        or python["implementation"] != "CPython"
+        or python["version"] != "3.11.15"
+        or type(python["architecture"]) is not str
+        or _SAFE_VERSION_RE.fullmatch(python["architecture"]) is None
+        or type(python["platform"]) is not str
+        or _SAFE_VERSION_RE.fullmatch(python["platform"]) is None
+        or type(python["sha256"]) is not str
+        or _HASH_RE.fullmatch(python["sha256"]) is None
+        or type(python["size"]) is not int
+        or python["size"] <= 0
+        or type(uv) is not dict
+        or set(uv) != {"name", "sha256", "size", "version"}
+        or uv["name"] != "uv"
+        or type(uv["version"]) is not str
+        or _SAFE_VERSION_RE.fullmatch(uv["version"]) is None
+        or type(uv["sha256"]) is not str
+        or _HASH_RE.fullmatch(uv["sha256"]) is None
+        or type(uv["size"]) is not int
+        or uv["size"] <= 0
+    ):
+        raise GateEReplayError("candidate_evidence_invalid")
+    return dict(python), dict(uv)
+
+
 def _load_candidate_evidence(
     evidence_path: Path,
 ) -> VerifiedCandidateEvidence:
@@ -1875,9 +1956,12 @@ def _load_candidate_evidence(
     implementation_commit = payload.get("implementation_commit")
     v01_tag_commit = payload.get("v01_tag_commit")
     run_id = payload.get("run_id")
+    runtime_python, runtime_uv = _candidate_runtime_payload(
+        payload.get("runtime")
+    )
     if (
         set(payload) != _CANDIDATE_KEYS
-        or payload.get("schema_version") != "1.0"
+        or payload.get("schema_version") != "1.1"
         or payload.get("project_name") != "a-share-quant"
         or payload.get("project_version") != "0.2.0"
         or payload.get("gate") != "E"
@@ -2033,6 +2117,8 @@ def _load_candidate_evidence(
         uv_lock=uv_lock,
         python_executable=python_executable,
         uv_executable=uv_executable,
+        runtime_python=runtime_python,
+        runtime_uv=runtime_uv,
         workspace=workspace,
         artifact=artifact,
         payload=payload,
@@ -2110,6 +2196,7 @@ def _audit_verified_candidate(
     GateEInputAudit,
     InstalledEnvironmentEvidence,
 ]:
+    runtime = _verify_candidate_runtime(candidate)
     replay = _replay_from_candidate(candidate)
     config = _verify_trust_roots(replay, require_clean=False)
     project_wheel, wheelhouse = _verified_wheel_inputs(replay)
@@ -2157,9 +2244,11 @@ def _audit_verified_candidate(
         accounting=accounting,
         input_audit=input_audit,
         evidence_path=candidate.evidence_path,
+        runtime=runtime,
     )
     if expected_payload != candidate.payload:
         raise GateEReplayError("candidate_evidence_mismatch")
+    _verify_candidate_runtime(candidate)
     return accounting, input_audit, installed
 
 
@@ -2471,6 +2560,7 @@ def _execute_candidate_a_stage(
             artifact = state.get("artifact")
             run_command = state.get("run_command")
             verify_command = state.get("verify_command")
+            runtime = state.get("runtime")
             if (
                 type(config) is not GateEConfig
                 or type(layout) is not GateEEnvironmentLayout
@@ -2484,8 +2574,12 @@ def _execute_candidate_a_stage(
                 or not isinstance(artifact, Path)
                 or type(run_command) is not tuple
                 or type(verify_command) is not tuple
+                or type(runtime) is not dict
+                or set(runtime) != {"python", "uv"}
             ):
                 raise GateEReplayError("invalid_replay_state")
+            if _capture_runtime_snapshots(replay) != runtime:
+                raise GateEReplayError("candidate_runtime_changed")
             accounting = audit_gate_e_bundle(
                 artifact,
                 expected_run_id=run_id,
@@ -2555,8 +2649,11 @@ def _execute_candidate_a_stage(
                 accounting=accounting,
                 input_audit=input_after,
                 evidence_path=evidence_path,
+                runtime=runtime,
             )
             _write_candidate_evidence(evidence_path, payload)
+            if _capture_runtime_snapshots(replay) != runtime:
+                raise GateEReplayError("candidate_runtime_changed")
             return CandidateAResult(
                 evidence_path=evidence_path,
                 artifact=artifact,
@@ -2592,6 +2689,7 @@ def run_candidate_a(
     state: dict[str, object] = {
         "candidate": "A",
         "hash_seed": "101",
+        "runtime": _capture_runtime_snapshots(replay),
         "workspace": replay.workspace_a,
     }
     events: list[GateEProgressEvent] = []
@@ -3478,9 +3576,16 @@ def replay_environment_b(
             ),
             read_only_paths=(replay.workspace_a,),
         )
+        runtime = _capture_runtime_snapshots(replay)
+        if runtime != {
+            "python": candidate_a.runtime_python,
+            "uv": candidate_a.runtime_uv,
+        }:
+            raise GateEReplayError("candidate_runtime_changed")
         state: dict[str, object] = {
             "candidate": "B",
             "hash_seed": "909",
+            "runtime": runtime,
             "workspace": replay.workspace_b,
         }
         result: CandidateAResult | None = None
@@ -3497,6 +3602,11 @@ def replay_environment_b(
         candidate_b = _load_candidate_evidence(
             result.evidence_path
         )
+        if (
+            candidate_b.runtime_python != candidate_a.runtime_python
+            or candidate_b.runtime_uv != candidate_a.runtime_uv
+        ):
+            raise GateEReplayError("candidate_runtime_changed")
         trusted_b = _verify_candidate_trust_evidence(
             trust=_verified_anchored_temporary_path(
                 temporary_root,

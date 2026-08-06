@@ -229,12 +229,18 @@ def _mock_successful_replay_b(tmp_path, monkeypatch):
         {"name": f"package-{index:02d}", "version": "1.0"}
         for index in range(36)
     ] + [{"name": "pip", "version": "24.0"}]
+    runtime = {
+        "python": {"sha256": "1" * 64},
+        "uv": {"sha256": "2" * 64},
+    }
     common = {
         "implementation_commit": replay.implementation_commit,
         "v01_tag_commit": replay.v01_tag_commit,
         "run_id": run_id,
         "project_wheel": replay.project_wheel,
         "wheelhouse_root": replay.wheelhouse_root,
+        "runtime_python": runtime["python"],
+        "runtime_uv": runtime["uv"],
         "payload": {"installed_packages": packages},
     }
     candidate_a = SimpleNamespace(
@@ -267,6 +273,11 @@ def _mock_successful_replay_b(tmp_path, monkeypatch):
         replay_module,
         "_verify_candidate_trust_evidence",
         lambda **_kwargs: {"expected_run_id": run_id},
+    )
+    monkeypatch.setattr(
+        replay_module,
+        "_capture_runtime_snapshots",
+        lambda _replay: runtime,
     )
     result = CandidateAResult(
         evidence_path=evidence_b,
@@ -945,6 +956,64 @@ def test_runtime_executables_are_discovered_as_real_regular_files():
         assert not executable.is_symlink()
 
 
+def test_candidate_runtime_payload_is_strict_and_path_neutral():
+    valid = {
+        "python": {
+            "architecture": "arm64",
+            "implementation": "CPython",
+            "name": "python",
+            "platform": "Darwin",
+            "sha256": "1" * 64,
+            "size": 123,
+            "version": "3.11.15",
+        },
+        "uv": {
+            "name": "uv",
+            "sha256": "2" * 64,
+            "size": 456,
+            "version": "0.11.23",
+        },
+    }
+
+    python, uv = replay_module._candidate_runtime_payload(valid)
+
+    assert python == valid["python"]
+    assert uv == valid["uv"]
+    assert "path" not in python
+    assert "path" not in uv
+
+    invalid = json.loads(json.dumps(valid))
+    invalid["uv"]["sha256"] = "short"
+    with pytest.raises(GateEReplayError) as captured:
+        replay_module._candidate_runtime_payload(invalid)
+    assert captured.value.code == "candidate_evidence_invalid"
+
+
+def test_candidate_runtime_drift_fails_closed(monkeypatch):
+    candidate = SimpleNamespace(
+        runtime_python={"sha256": "1" * 64},
+        runtime_uv={"sha256": "2" * 64},
+    )
+    monkeypatch.setattr(
+        replay_module,
+        "_replay_from_candidate",
+        lambda _candidate: object(),
+    )
+    monkeypatch.setattr(
+        replay_module,
+        "_capture_runtime_snapshots",
+        lambda _replay: {
+            "python": {"sha256": "1" * 64},
+            "uv": {"sha256": "3" * 64},
+        },
+    )
+
+    with pytest.raises(GateEReplayError) as captured:
+        replay_module._verify_candidate_runtime(candidate)
+
+    assert captured.value.code == "candidate_runtime_changed"
+
+
 def test_environment_b_cannot_run_before_anchor_pass(tmp_path):
     replay = _replay(tmp_path)
 
@@ -1000,6 +1069,8 @@ def test_environment_b_requires_exact_installed_package_inventory(
         "run_id": run_id,
         "project_wheel": replay.project_wheel,
         "wheelhouse_root": replay.wheelhouse_root,
+        "runtime_python": {"sha256": "1" * 64},
+        "runtime_uv": {"sha256": "2" * 64},
     }
     packages_a = [
         {"name": f"package-{index:02d}", "version": "1.0"}
@@ -1049,6 +1120,14 @@ def test_environment_b_requires_exact_installed_package_inventory(
         replay_module,
         "_verify_candidate_trust_evidence",
         lambda **_kwargs: {"expected_run_id": run_id},
+    )
+    monkeypatch.setattr(
+        replay_module,
+        "_capture_runtime_snapshots",
+        lambda _replay: {
+            "python": candidate_a.runtime_python,
+            "uv": candidate_a.runtime_uv,
+        },
     )
     result = CandidateAResult(
         evidence_path=evidence_b,
@@ -1486,6 +1565,11 @@ def test_each_trust_anchor_review_binding_is_enforced_before_b(
 def test_candidate_a_emits_fixed_progress_order(tmp_path, monkeypatch):
     replay = _replay(tmp_path)
     events: list[str] = []
+    runtime = {
+        "python": {"sha256": "1" * 64},
+        "uv": {"sha256": "2" * 64},
+    }
+    observed_runtime = []
     expected = CandidateAResult(
         evidence_path=tmp_path / "candidate-a-evidence.json",
         artifact=tmp_path / ("0" * 64),
@@ -1493,9 +1577,15 @@ def test_candidate_a_emits_fixed_progress_order(tmp_path, monkeypatch):
     )
 
     def execute(_replay, *, stage, state):
-        del _replay, state
+        del _replay
+        observed_runtime.append(state["runtime"])
         return expected if stage == "candidate_a_audited" else None
 
+    monkeypatch.setattr(
+        replay_module,
+        "_capture_runtime_snapshots",
+        lambda _replay: runtime,
+    )
     monkeypatch.setattr(
         replay_module,
         "_execute_candidate_a_stage",
@@ -1523,6 +1613,7 @@ def test_candidate_a_emits_fixed_progress_order(tmp_path, monkeypatch):
         range(1, 8)
     )
     assert all(event.total == 7 for event in result.progress)
+    assert observed_runtime == [runtime] * 7
 
 
 _VALID_COMMANDS = {

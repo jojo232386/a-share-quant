@@ -38,6 +38,7 @@ _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _MAX_WHEEL_BYTES = 1024 * 1024 * 1024
 _MAX_MANIFEST_BYTES = 1024 * 1024
+_MAX_RUNTIME_BYTES = 1024 * 1024 * 1024
 _SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 _READ_ONLY_WRITE_OPERATION = "file-write*"
 _VERIFICATION_MODE_WRITE_OPERATIONS = (
@@ -338,6 +339,179 @@ def _read_regular_single_link(
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _runtime_file_unchanged(
+    before_content: bytes,
+    before: os.stat_result,
+    after_content: bytes,
+    after: os.stat_result,
+) -> bool:
+    return (
+        before_content == after_content
+        and (before.st_dev, before.st_ino)
+        == (after.st_dev, after.st_ino)
+        and before.st_size == after.st_size
+        and before.st_mtime_ns == after.st_mtime_ns
+        and before.st_ctime_ns == after.st_ctime_ns
+    )
+
+
+def snapshot_python_runtime(path: Path) -> dict[str, object]:
+    """Capture one path-neutral, execution-verified CPython identity."""
+    if not isinstance(path, Path):
+        raise TypeError("path must be a Path")
+    executable = _resolved_runtime_executable(
+        os.fspath(path),
+        code="python_runtime_mismatch",
+    )
+    before_content, before = _read_regular_single_link(
+        executable,
+        code="python_runtime_mismatch",
+        maximum_bytes=_MAX_RUNTIME_BYTES,
+    )
+    try:
+        completed = subprocess.run(
+            [
+                os.fspath(executable),
+                "-c",
+                (
+                    "import json,platform,sys;"
+                    "print(json.dumps({"
+                    "'architecture':platform.machine(),"
+                    "'implementation':platform.python_implementation(),"
+                    "'platform':platform.system(),"
+                    "'version':'.'.join(str(value) for value in "
+                    "sys.version_info[:3])"
+                    "},sort_keys=True,separators=(',',':')))"
+                ),
+            ],
+            cwd=executable.parent,
+            env={
+                "HOME": "/private/var/empty",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PATH": _SYSTEM_PATH,
+                "PYTHONNOUSERSITE": "1",
+                "TZ": "Asia/Shanghai",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise GateEEnvironmentError(
+            "python_runtime_mismatch",
+            "Python runtime identity could not be verified",
+        ) from exc
+    after_content, after = _read_regular_single_link(
+        executable,
+        code="python_runtime_mismatch",
+        maximum_bytes=_MAX_RUNTIME_BYTES,
+    )
+    try:
+        identity = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise GateEEnvironmentError(
+            "python_runtime_mismatch",
+            "Python runtime identity could not be verified",
+        ) from exc
+    if (
+        completed.returncode != 0
+        or not _runtime_file_unchanged(
+            before_content,
+            before,
+            after_content,
+            after,
+        )
+        or type(identity) is not dict
+        or set(identity)
+        != {"architecture", "implementation", "platform", "version"}
+        or identity["implementation"] != "CPython"
+        or identity["version"] != "3.11.15"
+        or any(
+            type(identity[field]) is not str or not identity[field]
+            for field in ("architecture", "platform")
+        )
+    ):
+        raise GateEEnvironmentError(
+            "python_runtime_mismatch",
+            "Python runtime identity could not be verified",
+        )
+    return {
+        "architecture": identity["architecture"],
+        "implementation": identity["implementation"],
+        "name": "python",
+        "platform": identity["platform"],
+        "sha256": hashlib.sha256(before_content).hexdigest(),
+        "size": before.st_size,
+        "version": identity["version"],
+    }
+
+
+def snapshot_uv_runtime(path: Path) -> dict[str, object]:
+    """Capture one path-neutral, execution-verified uv identity."""
+    if not isinstance(path, Path):
+        raise TypeError("path must be a Path")
+    executable = _resolved_runtime_executable(
+        os.fspath(path),
+        code="uv_runtime_mismatch",
+    )
+    before_content, before = _read_regular_single_link(
+        executable,
+        code="uv_runtime_mismatch",
+        maximum_bytes=_MAX_RUNTIME_BYTES,
+    )
+    try:
+        completed = subprocess.run(
+            [os.fspath(executable), "--version"],
+            cwd=executable.parent,
+            env={
+                "HOME": "/private/var/empty",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PATH": _SYSTEM_PATH,
+                "TZ": "Asia/Shanghai",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise GateEEnvironmentError(
+            "uv_runtime_mismatch",
+            "uv runtime identity could not be verified",
+        ) from exc
+    after_content, after = _read_regular_single_link(
+        executable,
+        code="uv_runtime_mismatch",
+        maximum_bytes=_MAX_RUNTIME_BYTES,
+    )
+    fields = completed.stdout.strip().split()
+    if (
+        completed.returncode != 0
+        or not _runtime_file_unchanged(
+            before_content,
+            before,
+            after_content,
+            after,
+        )
+        or len(fields) < 2
+        or fields[0] != "uv"
+        or _VERSION_RE.fullmatch(fields[1]) is None
+    ):
+        raise GateEEnvironmentError(
+            "uv_runtime_mismatch",
+            "uv runtime identity could not be verified",
+        )
+    return {
+        "name": "uv",
+        "sha256": hashlib.sha256(before_content).hexdigest(),
+        "size": before.st_size,
+        "version": fields[1],
+    }
 
 
 def _safe_zip_names(archive: zipfile.ZipFile) -> tuple[str, ...]:

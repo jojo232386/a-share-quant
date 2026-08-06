@@ -17,6 +17,8 @@ import aquant.gate_e.replay as replay_module
 from aquant.gate_e.environment import (
     canonical_python_executable,
     canonical_uv_executable,
+    snapshot_python_runtime,
+    snapshot_uv_runtime,
     write_wheelhouse_manifest,
 )
 from aquant.portfolio import export_portfolio_run, run_verified_portfolio
@@ -133,6 +135,8 @@ def _evidence(
         uv_lock=_copy_regular(PROJECT_ROOT / "uv.lock", tmp_path / "locks/uv.lock"),
         python_executable=_PYTHON,
         uv_executable=_UV,
+        expected_python_snapshot=snapshot_python_runtime(_PYTHON),
+        expected_uv_snapshot=snapshot_uv_runtime(_UV),
         wheelhouse_root=wheelhouse,
         wheelhouse_manifest=wheelhouse_manifest,
         v01_tag_commit="b" * 40,
@@ -438,6 +442,7 @@ def test_python_binary_hash_and_version_are_bound(tmp_path):
         evidence.python_executable,
         tmp_path / "fake/python3.11",
     )
+    fake_python.chmod(0o755)
 
     with pytest.raises(GateETrustError) as captured:
         verify_gate_e_trust(
@@ -446,6 +451,33 @@ def test_python_binary_hash_and_version_are_bound(tmp_path):
         )
 
     assert captured.value.code == "python_mismatch"
+
+
+def test_trust_rejects_uv_replaced_after_candidate_snapshot(tmp_path):
+    evidence, run_id = _evidence(tmp_path)
+    fake_uv = _copy_regular(
+        evidence.uv_executable,
+        tmp_path / "fake/uv",
+    )
+    fake_uv.chmod(0o755)
+    candidate_snapshot = snapshot_uv_runtime(fake_uv)
+    changed = fake_uv.read_bytes() + b"runtime-drift"
+    fake_uv.write_bytes(changed)
+    drifted = replace(
+        evidence,
+        uv_executable=fake_uv,
+        expected_uv_snapshot=candidate_snapshot,
+    )
+
+    with pytest.raises(GateETrustError) as captured:
+        write_gate_e_trust(
+            tmp_path / "drifted-trust.json",
+            evidence=drifted,
+            expected_run_id=run_id,
+        )
+
+    assert captured.value.code == "uv_mismatch"
+    assert not (tmp_path / "drifted-trust.json").exists()
 
 
 def test_trust_executable_snapshots_are_device_neutral(tmp_path):
