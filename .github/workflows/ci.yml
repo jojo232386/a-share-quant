@@ -10,7 +10,10 @@ permissions:
 
 jobs:
   quality:
-    runs-on: ubuntu-latest
+    # Gate E isolation is enforced with Apple's sandbox-exec; use the same OS
+    # family as the audited release gate instead of treating its absence on
+    # Linux as a product failure.
+    runs-on: macos-latest
     steps:
       - name: Check out submitted revision
         uses: actions/checkout@v4
