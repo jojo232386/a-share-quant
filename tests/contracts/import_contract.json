@@ -1,0 +1,117 @@
+{
+  "schema_version": "1.0",
+  "generated_from_main_sha": "abff692be9587cd25a0d4b95a228851934d98583",
+  "protected_modules": [
+    "aquant",
+    "aquant.data",
+    "aquant.backtest",
+    "aquant.rules",
+    "aquant.risk",
+    "aquant.portfolio",
+    "aquant.reporting",
+    "aquant.research",
+    "aquant.gate_e",
+    "aquant.cli",
+    "aquant.backtest_cli",
+    "aquant.report_cli",
+    "aquant.experiment_cli",
+    "aquant.release_cli",
+    "aquant.portfolio_cli",
+    "aquant.gate_e.cli"
+  ],
+  "top_level_symbols": [],
+  "console_scripts": {
+    "aquant-data": "aquant.cli:main",
+    "aquant-backtest": "aquant.backtest_cli:main",
+    "aquant-report": "aquant.report_cli:main",
+    "aquant-experiment": "aquant.experiment_cli:main",
+    "aquant-release": "aquant.release_cli:main",
+    "aquant-portfolio": "aquant.portfolio_cli:main",
+    "aquant-gate-e": "aquant.gate_e.cli:main"
+  },
+  "protected_capabilities": [
+    {
+      "capability_id": "ashare_execution_rules",
+      "description": "A-share supported-instrument scope, T+1 availability, lot constraints, price limits, suspension rejection and dated fees.",
+      "modules": [
+        "aquant.rules",
+        "aquant.backtest"
+      ],
+      "evidence_paths": [
+        "src/aquant/rules/models.py",
+        "src/aquant/rules/engine.py",
+        "src/aquant/backtest/execution.py",
+        "tests/unit/test_a_share_rules.py",
+        "tests/unit/test_a_share_execution.py"
+      ]
+    },
+    {
+      "capability_id": "data_quality_and_provenance",
+      "description": "Fail-closed data quality checks, snapshot/manifest identity and corporate-action provenance.",
+      "modules": [
+        "aquant.data",
+        "aquant.gate_e"
+      ],
+      "evidence_paths": [
+        "src/aquant/data/quality.py",
+        "src/aquant/data/manifest.py",
+        "src/aquant/data/corporate_actions.py",
+        "tests/unit/test_market_data.py",
+        "tests/unit/test_snapshot_manifest.py"
+      ]
+    },
+    {
+      "capability_id": "backtrader_adapter_boundary",
+      "description": "The Backtrader integration remains an adapter boundary where generic engine mechanics meet A-share execution rules.",
+      "modules": [
+        "aquant.backtest",
+        "aquant.rules"
+      ],
+      "evidence_paths": [
+        "src/aquant/backtest/feed.py",
+        "src/aquant/backtest/execution.py",
+        "src/aquant/backtest/runner.py",
+        "tests/unit/test_backtest_baselines.py"
+      ]
+    },
+    {
+      "capability_id": "portfolio_ledger_and_run_identity",
+      "description": "Shared-cash portfolio accounting, availability, corporate-action posting and deterministic run/result identity.",
+      "modules": [
+        "aquant.portfolio",
+        "aquant.data"
+      ],
+      "evidence_paths": [
+        "src/aquant/portfolio/accounting.py",
+        "src/aquant/portfolio/availability.py",
+        "src/aquant/portfolio/identity.py",
+        "tests/unit/test_portfolio_accounting.py",
+        "tests/unit/test_portfolio_identity.py"
+      ]
+    },
+    {
+      "capability_id": "gate_e_audit_boundary",
+      "description": "Research-only Gate E trust, approval, replay and release evidence boundaries remain protected from ordinary contraction.",
+      "modules": [
+        "aquant.gate_e",
+        "aquant.data"
+      ],
+      "evidence_paths": [
+        "src/aquant/gate_e/trust.py",
+        "src/aquant/gate_e/replay.py",
+        "src/aquant/gate_e/audit.py",
+        "tests/unit/test_gate_e_trust.py",
+        "tests/unit/test_gate_e_replay.py"
+      ]
+    }
+  ],
+  "intentional_non_contracts": [
+    "Private functions are not frozen by this contract.",
+    "Private classes are not frozen by this contract.",
+    "The concrete location of helpers is not frozen by this contract.",
+    "Internal directory layout is not frozen by this contract.",
+    "Internal CLI argument parsing implementation is not frozen by this contract.",
+    "Internal release and replay implementation is not frozen by this contract.",
+    "Internal Gate E temporary-tool structure is not frozen by this contract."
+  ]
+}
