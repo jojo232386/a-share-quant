@@ -276,8 +276,11 @@ def _mock_successful_replay_b(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         replay_module,
-        "_capture_runtime_snapshots",
-        lambda _replay: runtime,
+        "_capture_runtime_controls",
+        lambda _replay: (
+            runtime,
+            {"python": object(), "uv": object()},
+        ),
     )
     result = CandidateAResult(
         evidence_path=evidence_b,
@@ -879,13 +882,26 @@ def test_candidate_b_environment_stage_denies_writes_to_candidate_a(
     layout = SimpleNamespace(root=replay.workspace_b)
     installed = SimpleNamespace(project_version="0.2.0")
     calls = []
+    guards = {"python": object(), "uv": object()}
 
     def make_layout(*_args, **kwargs):
-        calls.append(("layout", kwargs["read_only_paths"]))
+        calls.append(
+            (
+                "layout",
+                kwargs["read_only_paths"],
+                kwargs["expected_base_python_guard"],
+            )
+        )
         return layout
 
     def install_environment(*_args, **kwargs):
-        calls.append(("install", kwargs["read_only_paths"]))
+        calls.append(
+            (
+                "install",
+                kwargs["read_only_paths"],
+                kwargs["expected_uv_guard"],
+            )
+        )
         return installed
 
     monkeypatch.setattr(
@@ -903,7 +919,13 @@ def test_candidate_b_environment_stage_denies_writes_to_candidate_a(
         "hash_seed": "909",
         "workspace": replay.workspace_b,
         "project_wheel_evidence": wheel,
+        "runtime_guards": guards,
     }
+    monkeypatch.setattr(
+        replay_module,
+        "_verify_runtime_execution_guards",
+        lambda *_args: None,
+    )
 
     replay_module._execute_candidate_a_stage(
         replay,
@@ -912,8 +934,8 @@ def test_candidate_b_environment_stage_denies_writes_to_candidate_a(
     )
 
     assert calls == [
-        ("layout", (replay.workspace_a,)),
-        ("install", (replay.workspace_a,)),
+        ("layout", (replay.workspace_a,), guards["python"]),
+        ("install", (replay.workspace_a,), guards["uv"]),
     ]
     assert state["layout"] is layout
     assert state["installed"] is installed
@@ -1123,11 +1145,14 @@ def test_environment_b_requires_exact_installed_package_inventory(
     )
     monkeypatch.setattr(
         replay_module,
-        "_capture_runtime_snapshots",
-        lambda _replay: {
-            "python": candidate_a.runtime_python,
-            "uv": candidate_a.runtime_uv,
-        },
+        "_capture_runtime_controls",
+        lambda _replay: (
+            {
+                "python": candidate_a.runtime_python,
+                "uv": candidate_a.runtime_uv,
+            },
+            {"python": object(), "uv": object()},
+        ),
     )
     result = CandidateAResult(
         evidence_path=evidence_b,
@@ -1570,6 +1595,8 @@ def test_candidate_a_emits_fixed_progress_order(tmp_path, monkeypatch):
         "uv": {"sha256": "2" * 64},
     }
     observed_runtime = []
+    guards = {"python": object(), "uv": object()}
+    observed_guards = []
     expected = CandidateAResult(
         evidence_path=tmp_path / "candidate-a-evidence.json",
         artifact=tmp_path / ("0" * 64),
@@ -1579,12 +1606,13 @@ def test_candidate_a_emits_fixed_progress_order(tmp_path, monkeypatch):
     def execute(_replay, *, stage, state):
         del _replay
         observed_runtime.append(state["runtime"])
+        observed_guards.append(state["runtime_guards"])
         return expected if stage == "candidate_a_audited" else None
 
     monkeypatch.setattr(
         replay_module,
-        "_capture_runtime_snapshots",
-        lambda _replay: runtime,
+        "_capture_runtime_controls",
+        lambda _replay: (runtime, guards),
     )
     monkeypatch.setattr(
         replay_module,
@@ -1614,6 +1642,7 @@ def test_candidate_a_emits_fixed_progress_order(tmp_path, monkeypatch):
     )
     assert all(event.total == 7 for event in result.progress)
     assert observed_runtime == [runtime] * 7
+    assert observed_guards == [guards] * 7
 
 
 _VALID_COMMANDS = {

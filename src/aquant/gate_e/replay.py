@@ -33,10 +33,12 @@ from aquant.gate_e.environment import (
     GateEEnvironmentError,
     GateEEnvironmentLayout,
     InstalledEnvironmentEvidence,
+    RuntimeExecutionGuard,
     WheelEvidence,
     WheelhouseEvidence,
     canonical_python_executable,
     canonical_uv_executable,
+    capture_runtime_execution_guard,
     copy_gate_e_config,
     inspect_installed_environment,
     inspect_project_wheel,
@@ -46,6 +48,7 @@ from aquant.gate_e.environment import (
     snapshot_python_runtime,
     snapshot_uv_runtime,
     stage_environment_inputs,
+    verify_runtime_execution_guard,
     verify_wheelhouse,
     wheelhouse_requirements_from_manifest,
 )
@@ -1018,6 +1021,56 @@ def _capture_runtime_snapshots(
             cause_code=getattr(exc, "code", None),
         ) from exc
     return {"python": python, "uv": uv}
+
+
+def _verify_runtime_execution_guards(
+    replay: GateEReplay,
+    guards: dict[str, RuntimeExecutionGuard],
+) -> None:
+    if (
+        type(guards) is not dict
+        or set(guards) != {"python", "uv"}
+        or type(guards["python"]) is not RuntimeExecutionGuard
+        or type(guards["uv"]) is not RuntimeExecutionGuard
+    ):
+        raise GateEReplayError("invalid_replay_state")
+    try:
+        verify_runtime_execution_guard(
+            replay.python_executable,
+            guards["python"],
+        )
+        verify_runtime_execution_guard(
+            replay.uv_executable,
+            guards["uv"],
+        )
+    except (GateEEnvironmentError, OSError, TypeError, ValueError) as exc:
+        raise GateEReplayError(
+            "candidate_runtime_changed",
+            cause_code=getattr(exc, "code", None),
+        ) from exc
+
+
+def _capture_runtime_controls(
+    replay: GateEReplay,
+) -> tuple[
+    dict[str, dict[str, object]],
+    dict[str, RuntimeExecutionGuard],
+]:
+    try:
+        guards = {
+            "python": capture_runtime_execution_guard(
+                replay.python_executable
+            ),
+            "uv": capture_runtime_execution_guard(replay.uv_executable),
+        }
+    except (GateEEnvironmentError, OSError, TypeError, ValueError) as exc:
+        raise GateEReplayError(
+            "candidate_runtime_changed",
+            cause_code=getattr(exc, "code", None),
+        ) from exc
+    runtime = _capture_runtime_snapshots(replay)
+    _verify_runtime_execution_guards(replay, guards)
+    return runtime, guards
 
 
 def _verify_candidate_runtime(
@@ -2408,12 +2461,17 @@ def _execute_candidate_a_stage(
             state["wheelhouse_evidence"] = wheelhouse
         elif stage == "environment_a_installed":
             project = state.get("project_wheel_evidence")
+            runtime_guards = state.get("runtime_guards")
             if type(project) is not WheelEvidence:
                 raise GateEReplayError("invalid_replay_state")
+            if type(runtime_guards) is not dict:
+                raise GateEReplayError("invalid_replay_state")
+            _verify_runtime_execution_guards(replay, runtime_guards)
             layout = make_environment_layout(
                 workspace,
                 repository_root=replay.repository_root,
                 base_python=replay.python_executable,
+                expected_base_python_guard=runtime_guards["python"],
                 read_only_paths=_candidate_b_write_denials(
                     replay,
                     workspace=workspace,
@@ -2431,12 +2489,14 @@ def _execute_candidate_a_stage(
                 ),
                 hash_seed=hash_seed,
                 uv_executable=replay.uv_executable,
+                expected_uv_guard=runtime_guards["uv"],
                 require_gate_e_cli=True,
                 read_only_paths=_candidate_b_write_denials(
                     replay,
                     workspace=workspace,
                 ),
             )
+            _verify_runtime_execution_guards(replay, runtime_guards)
             state["layout"] = layout
             state["installed"] = installed
         elif stage == "inputs_a_verified":
@@ -2561,6 +2621,7 @@ def _execute_candidate_a_stage(
             run_command = state.get("run_command")
             verify_command = state.get("verify_command")
             runtime = state.get("runtime")
+            runtime_guards = state.get("runtime_guards")
             if (
                 type(config) is not GateEConfig
                 or type(layout) is not GateEEnvironmentLayout
@@ -2576,8 +2637,10 @@ def _execute_candidate_a_stage(
                 or type(verify_command) is not tuple
                 or type(runtime) is not dict
                 or set(runtime) != {"python", "uv"}
+                or type(runtime_guards) is not dict
             ):
                 raise GateEReplayError("invalid_replay_state")
+            _verify_runtime_execution_guards(replay, runtime_guards)
             if _capture_runtime_snapshots(replay) != runtime:
                 raise GateEReplayError("candidate_runtime_changed")
             accounting = audit_gate_e_bundle(
@@ -2652,6 +2715,7 @@ def _execute_candidate_a_stage(
                 runtime=runtime,
             )
             _write_candidate_evidence(evidence_path, payload)
+            _verify_runtime_execution_guards(replay, runtime_guards)
             if _capture_runtime_snapshots(replay) != runtime:
                 raise GateEReplayError("candidate_runtime_changed")
             return CandidateAResult(
@@ -2686,10 +2750,12 @@ def run_candidate_a(
     if type(replay) is not GateEReplay:
         raise GateEReplayError("invalid_replay_contract")
     callback = progress if progress is not None else lambda _event: None
+    runtime, runtime_guards = _capture_runtime_controls(replay)
     state: dict[str, object] = {
         "candidate": "A",
         "hash_seed": "101",
-        "runtime": _capture_runtime_snapshots(replay),
+        "runtime": runtime,
+        "runtime_guards": runtime_guards,
         "workspace": replay.workspace_a,
     }
     events: list[GateEProgressEvent] = []
@@ -3576,7 +3642,7 @@ def replay_environment_b(
             ),
             read_only_paths=(replay.workspace_a,),
         )
-        runtime = _capture_runtime_snapshots(replay)
+        runtime, runtime_guards = _capture_runtime_controls(replay)
         if runtime != {
             "python": candidate_a.runtime_python,
             "uv": candidate_a.runtime_uv,
@@ -3586,6 +3652,7 @@ def replay_environment_b(
             "candidate": "B",
             "hash_seed": "909",
             "runtime": runtime,
+            "runtime_guards": runtime_guards,
             "workspace": replay.workspace_b,
         }
         result: CandidateAResult | None = None

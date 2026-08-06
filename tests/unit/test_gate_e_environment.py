@@ -15,6 +15,7 @@ from aquant.gate_e.environment import (
     GateEEnvironmentError,
     GateEEnvironmentLayout,
     build_project_wheel,
+    capture_runtime_execution_guard,
     copy_gate_e_config,
     execution_environment,
     inspect_project_wheel,
@@ -23,6 +24,7 @@ from aquant.gate_e.environment import (
     run_controlled,
     run_sandboxed,
     stage_environment_inputs,
+    verify_runtime_execution_guard,
     verify_wheelhouse,
     write_wheelhouse_install_lock,
     write_wheelhouse_manifest,
@@ -324,12 +326,70 @@ def test_environment_bootstrap_denies_writes_to_candidate_a(
     for command in commands:
         assert command[:2] == ("/usr/bin/sandbox-exec", "-p")
         assert str(candidate_a) in command[2]
+        assert str(layout.base_python) in command[2]
         assert "file-write*" in command[2]
     assert (
         marker.read_bytes(),
         marker.stat().st_mtime_ns,
         candidate_a.stat().st_mtime_ns,
     ) == before
+
+
+def test_runtime_guard_rejects_same_bytes_restored_after_mutation(tmp_path):
+    executable = tmp_path / "runtime"
+    source = environment_module.canonical_uv_executable()
+    shutil.copyfile(source, executable)
+    executable.chmod(0o755)
+    original = executable.read_bytes()
+    guard = capture_runtime_execution_guard(executable)
+
+    executable.write_bytes(b"x" * len(original))
+    executable.write_bytes(original)
+    executable.chmod(0o755)
+
+    with pytest.raises(GateEEnvironmentError) as captured:
+        verify_runtime_execution_guard(executable, guard)
+
+    assert captured.value.code == "runtime_execution_changed"
+
+
+def test_guarded_subprocess_rejects_runtime_mutation_then_restore(
+    tmp_path,
+    monkeypatch,
+):
+    executable = tmp_path / "runtime"
+    shutil.copyfile(environment_module.canonical_uv_executable(), executable)
+    executable.chmod(0o755)
+    original = executable.read_bytes()
+    guard = capture_runtime_execution_guard(executable)
+
+    def mutate_then_restore(*_args, **_kwargs):
+        executable.write_bytes(b"x" * len(original))
+        executable.write_bytes(original)
+        executable.chmod(0o755)
+        return environment_module.subprocess.CompletedProcess(
+            args=[str(executable)],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        environment_module,
+        "run_sandboxed",
+        mutate_then_restore,
+    )
+
+    with pytest.raises(GateEEnvironmentError) as captured:
+        environment_module._run_with_runtime_guard(
+            object(),
+            [str(executable)],
+            runtime_path=executable,
+            runtime_guard=guard,
+            hash_seed="101",
+        )
+
+    assert captured.value.code == "runtime_execution_changed"
 
 
 def test_environment_root_rejects_symlinked_parent(tmp_path):

@@ -124,6 +124,19 @@ class InstalledEnvironmentEvidence:
     gate_e_cli: Path | None
 
 
+@dataclass(frozen=True)
+class RuntimeExecutionGuard:
+    """Device-local runtime file identity retained only in controller memory."""
+
+    path: Path
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    sha256: str
+
+
 def _normalized_name(value: str) -> str:
     return _NORMALIZE_NAME_RE.sub("-", value).lower()
 
@@ -355,6 +368,51 @@ def _runtime_file_unchanged(
         and before.st_mtime_ns == after.st_mtime_ns
         and before.st_ctime_ns == after.st_ctime_ns
     )
+
+
+def capture_runtime_execution_guard(path: Path) -> RuntimeExecutionGuard:
+    """Bind the exact executable object used during one replay process."""
+    if not isinstance(path, Path):
+        raise TypeError("path must be a Path")
+    executable = _resolved_runtime_executable(
+        os.fspath(path),
+        code="runtime_execution_changed",
+    )
+    content, metadata = _read_regular_single_link(
+        executable,
+        code="runtime_execution_changed",
+        maximum_bytes=_MAX_RUNTIME_BYTES,
+    )
+    return RuntimeExecutionGuard(
+        path=executable,
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        size=metadata.st_size,
+        mtime_ns=metadata.st_mtime_ns,
+        ctime_ns=metadata.st_ctime_ns,
+        sha256=hashlib.sha256(content).hexdigest(),
+    )
+
+
+def verify_runtime_execution_guard(
+    path: Path,
+    expected: RuntimeExecutionGuard,
+) -> None:
+    """Fail if a runtime object changed, even when its bytes were restored."""
+    if not isinstance(path, Path) or type(expected) is not RuntimeExecutionGuard:
+        raise TypeError("path and expected runtime guard are invalid")
+    try:
+        observed = capture_runtime_execution_guard(path)
+    except GateEEnvironmentError as exc:
+        raise GateEEnvironmentError(
+            "runtime_execution_changed",
+            "runtime executable changed during Gate E execution",
+        ) from exc
+    if observed != expected:
+        raise GateEEnvironmentError(
+            "runtime_execution_changed",
+            "runtime executable changed during Gate E execution",
+        )
 
 
 def snapshot_python_runtime(path: Path) -> dict[str, object]:
@@ -1365,6 +1423,7 @@ def make_environment_layout(
     *,
     repository_root: Path,
     base_python: Path | None = None,
+    expected_base_python_guard: RuntimeExecutionGuard | None = None,
     read_only_paths: Sequence[Path] = (),
 ) -> GateEEnvironmentLayout:
     """Create one fresh venv, HOME, cache, project and output hierarchy."""
@@ -1394,6 +1453,14 @@ def make_environment_layout(
     )
     del repository_metadata
     _regular_single_link(base_python, code="unsafe_base_python")
+    if expected_base_python_guard is None:
+        expected_base_python_guard = capture_runtime_execution_guard(
+            base_python
+        )
+    verify_runtime_execution_guard(
+        base_python,
+        expected_base_python_guard,
+    )
     parent = root.parent.resolve(strict=True)
     _safe_directory(parent, code="unsafe_environment_root")
     intended = parent / root.name
@@ -1410,7 +1477,7 @@ def make_environment_layout(
             "Gate E environment must be outside the repository",
         )
     bootstrap_read_only = _validated_bootstrap_read_only_paths(
-        read_only_paths
+        (*read_only_paths, base_python)
     )
     try:
         root.mkdir(mode=0o700, exist_ok=False)
@@ -1451,23 +1518,33 @@ def make_environment_layout(
         repository_root=repository,
         base_python=base_python,
     )
+    verify_runtime_execution_guard(
+        base_python,
+        expected_base_python_guard,
+    )
     try:
-        completed = subprocess.run(
-            _bootstrap_sandboxed_command(
-                [str(base_python), "-m", "venv", str(venv)],
-                bootstrap_read_only,
-            ),
-            cwd=root,
-            env=_environment_values(layout, hash_seed="0"),
-            capture_output=True,
-            text=True,
-            check=False,
+        try:
+            completed = subprocess.run(
+                _bootstrap_sandboxed_command(
+                    [str(base_python), "-m", "venv", str(venv)],
+                    bootstrap_read_only,
+                ),
+                cwd=root,
+                env=_environment_values(layout, hash_seed="0"),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            raise GateEEnvironmentError(
+                "environment_venv_failed",
+                "Gate E venv could not be created",
+            ) from exc
+    finally:
+        verify_runtime_execution_guard(
+            base_python,
+            expected_base_python_guard,
         )
-    except OSError as exc:
-        raise GateEEnvironmentError(
-            "environment_venv_failed",
-            "Gate E venv could not be created",
-        ) from exc
     if completed.returncode != 0 or not python.exists():
         raise GateEEnvironmentError(
             "environment_venv_failed",
@@ -1506,6 +1583,10 @@ def make_environment_layout(
             "environment_python_mismatch",
             "Gate E venv must use Python 3.11.15",
         )
+    verify_runtime_execution_guard(
+        base_python,
+        expected_base_python_guard,
+    )
     return layout
 
 
@@ -2207,6 +2288,29 @@ def inspect_installed_environment(
     )
 
 
+def _run_with_runtime_guard(
+    layout: GateEEnvironmentLayout,
+    command: Sequence[str],
+    *,
+    runtime_path: Path,
+    runtime_guard: RuntimeExecutionGuard,
+    hash_seed: str,
+    timeout_seconds: int = 120,
+    read_only_paths: Sequence[Path] = (),
+) -> subprocess.CompletedProcess[str]:
+    verify_runtime_execution_guard(runtime_path, runtime_guard)
+    try:
+        return run_sandboxed(
+            layout,
+            command,
+            hash_seed=hash_seed,
+            timeout_seconds=timeout_seconds,
+            read_only_paths=read_only_paths,
+        )
+    finally:
+        verify_runtime_execution_guard(runtime_path, runtime_guard)
+
+
 def install_gate_e_environment(
     layout: GateEEnvironmentLayout,
     *,
@@ -2218,6 +2322,7 @@ def install_gate_e_environment(
     expected_requirements: Mapping[str, str],
     hash_seed: str,
     uv_executable: Path | None = None,
+    expected_uv_guard: RuntimeExecutionGuard | None = None,
     require_gate_e_cli: bool = False,
     read_only_paths: Sequence[Path] = (),
 ) -> InstalledEnvironmentEvidence:
@@ -2252,6 +2357,9 @@ def install_gate_e_environment(
             "unsafe_uv_executable",
             "Gate E uv executable is not executable",
         )
+    if expected_uv_guard is None:
+        expected_uv_guard = capture_runtime_execution_guard(resolved_uv)
+    verify_runtime_execution_guard(resolved_uv, expected_uv_guard)
     project = inspect_project_wheel(project_wheel)
     if project.sha256 != expected_project_sha256:
         raise GateEEnvironmentError(
@@ -2278,9 +2386,10 @@ def install_gate_e_environment(
         wheelhouse,
         wheelhouse_manifest,
         install_lock,
+        resolved_uv,
         *read_only_paths,
     )
-    sync = run_sandboxed(
+    sync = _run_with_runtime_guard(
         layout,
         [
             str(resolved_uv),
@@ -2299,13 +2408,15 @@ def install_gate_e_environment(
         hash_seed=hash_seed,
         timeout_seconds=600,
         read_only_paths=sealed_paths,
+        runtime_path=resolved_uv,
+        runtime_guard=expected_uv_guard,
     )
     _require_success(
         sync,
         code="environment_dependency_install_failed",
         message="sealed Gate E dependencies could not be installed",
     )
-    install = run_sandboxed(
+    install = _run_with_runtime_guard(
         layout,
         [
             str(resolved_uv),
@@ -2322,13 +2433,15 @@ def install_gate_e_environment(
         hash_seed=hash_seed,
         timeout_seconds=600,
         read_only_paths=sealed_paths,
+        runtime_path=resolved_uv,
+        runtime_guard=expected_uv_guard,
     )
     _require_success(
         install,
         code="environment_project_install_failed",
         message="sealed Gate E project wheel could not be installed",
     )
-    check = run_sandboxed(
+    check = _run_with_runtime_guard(
         layout,
         [
             str(resolved_uv),
@@ -2339,6 +2452,8 @@ def install_gate_e_environment(
         ],
         hash_seed=hash_seed,
         read_only_paths=sealed_paths,
+        runtime_path=resolved_uv,
+        runtime_guard=expected_uv_guard,
     )
     _require_success(
         check,
@@ -2362,6 +2477,7 @@ def install_gate_e_environment(
             "environment_install_input_changed",
             "sealed Gate E installation inputs changed during install",
         )
+    verify_runtime_execution_guard(resolved_uv, expected_uv_guard)
     return inspect_installed_environment(
         layout,
         hash_seed=hash_seed,
