@@ -20,14 +20,33 @@ class ReleaseNetworkError(RuntimeError):
 
 @contextmanager
 def offline_network_guard() -> Iterator[None]:
-    """Block common socket and Requests exits, then restore them exactly."""
+    """Block process-local socket, DNS, and Requests exits."""
 
     def blocked(*_args, **_kwargs):
         raise ReleaseNetworkError()
 
     with ExitStack() as stack:
-        stack.enter_context(patch.object(socket.socket, "connect", blocked))
-        stack.enter_context(patch.object(socket.socket, "connect_ex", blocked))
+        for method_name in (
+            "connect",
+            "connect_ex",
+            "send",
+            "sendall",
+            "sendfile",
+            "sendmsg",
+            "sendto",
+        ):
+            if hasattr(socket.socket, method_name):
+                stack.enter_context(
+                    patch.object(socket.socket, method_name, blocked)
+                )
+        for resolver_name in (
+            "getaddrinfo",
+            "gethostbyaddr",
+            "gethostbyname",
+            "gethostbyname_ex",
+            "getnameinfo",
+        ):
+            stack.enter_context(patch.object(socket, resolver_name, blocked))
         stack.enter_context(patch.object(socket, "create_connection", blocked))
         stack.enter_context(patch.object(requests.Session, "request", blocked))
         yield

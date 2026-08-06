@@ -28,6 +28,8 @@ uv run --no-sync aquant-backtest --help
 uv run --no-sync aquant-report --help
 uv run --no-sync aquant-experiment --help
 uv run --no-sync aquant-release --help
+uv run --no-sync aquant-portfolio --help
+uv run --no-sync aquant-gate-e --help
 ```
 
 仓库已包含确定性生成的合成 v0.1 发布夹具，可执行：
@@ -50,6 +52,8 @@ Gate E 的公开通过标准是：从固定实现与冻结输入独立生成 Can
 - 不证明策略盈利、Alpha 有效、真实成交可行，或可用于实盘。
 - 日线 OHLC 无法验证开盘时的盘口、排队顺序或成交量；保守拒单不是对真实成交的还原。
 - 10 个试点标的仅用于工程验证，不代表全市场、历史成分股或投资建议。
+- 公开冻结输入是确定性合成夹具，不是真实行情；2074 个日历日期中，
+  2072 个进入正式组合区间，边界日仅用于信号或收尾验证。
 - 未支持的证券、历史阶段和公司行为必须拒绝运行，而不是套用近似规则继续计算。
 
 详情见 [研究范围](docs/scope.md)、[支持矩阵](docs/support_matrix.md)、[A 股执行规则](docs/a_share_execution_rules.md)、[数据质量验收](docs/data_quality_acceptance.md) 与 [已知限制](docs/known_limitations.md)。

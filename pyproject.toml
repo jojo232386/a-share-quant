@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "a-share-quant"
-version = "0.1.0"
+version = "0.2.0"
 description = "A-share quantitative research and simulation sandbox"
 requires-python = ">=3.11,<3.12"
 classifiers = ["Operating System :: POSIX"]
@@ -23,6 +23,8 @@ aquant-backtest = "aquant.backtest_cli:main"
 aquant-report = "aquant.report_cli:main"
 aquant-experiment = "aquant.experiment_cli:main"
 aquant-release = "aquant.release_cli:main"
+aquant-portfolio = "aquant.portfolio_cli:main"
+aquant-gate-e = "aquant.gate_e.cli:main"
 
 [dependency-groups]
 dev = [
@@ -32,6 +34,9 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aquant"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"pyproject.toml" = "aquant/pyproject.toml"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

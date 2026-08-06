@@ -73,10 +73,12 @@ v0.1 对八只普通主板股票和两只股票型宽基 ETF 使用 10% 涨跌�
 - `cash.csv`
 - `equity.csv`
 - `lots.csv`
+- `corporate_actions.csv`
+- `receivables.csv`
 - `missing_sessions.json`
 - `artifact_manifest.json`
 
-`artifact_manifest.json` 对前八个载荷文件保存 SHA-256。导出采用整包原子发布；已有同名运行目录或冲突文件时拒绝覆盖。
+`artifact_manifest.json` 对除自身外的十个载荷文件保存 SHA-256。导出采用整包原子发布；已有同名运行目录或冲突文件时拒绝覆盖。
 
 运行 ID 绑定行情快照、交易日历、费用政策、证券类型、策略配置、Backtrader 版本和本项目执行实现源码指纹。每笔拒单保存机器可读原因。
 
