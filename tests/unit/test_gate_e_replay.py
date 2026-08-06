@@ -16,6 +16,7 @@ import aquant.gate_e.cli as cli_module
 import aquant.gate_e.replay as replay_module
 from aquant.gate_e.config import load_gate_e_config
 from aquant.gate_e.environment import (
+    EnvironmentExecutionGuard,
     GateEEnvironmentLayout,
     InstalledEnvironmentEvidence,
     WheelEvidence,
@@ -822,6 +823,11 @@ def test_run_and_reverse_stages_verify_the_post_run_project_tree(
         packages=(("a-share-quant", "0.2.0"),),
         portfolio_cli=tmp_path / "venv/bin/aquant-portfolio",
         gate_e_cli=tmp_path / "venv/bin/aquant-gate-e",
+        execution_guard=EnvironmentExecutionGuard(
+            root=layout.venv,
+            entry_count=1,
+            digest="d" * 64,
+        ),
     )
     run_id = "c" * 64
     artifact = layout.output_root / "portfolios" / run_id
@@ -863,6 +869,103 @@ def test_run_and_reverse_stages_verify_the_post_run_project_tree(
     )
 
     assert verifications == [run_id, run_id]
+
+
+def test_run_and_reverse_bind_the_installed_environment_guard(
+    tmp_path,
+    monkeypatch,
+):
+    replay = _replay(tmp_path)
+    config = load_gate_e_config(replay.config_path)
+    root = replay.workspace_a
+    project = root / "project"
+    output = project / "outputs"
+    output.mkdir(parents=True)
+    layout = GateEEnvironmentLayout(
+        root=root,
+        home=root / "home",
+        xdg_cache=root / "xdg-cache",
+        uv_cache=root / "uv-cache",
+        venv=root / "venv",
+        python=root / "venv/bin/python",
+        project_root=project,
+        input_root=project,
+        output_root=output,
+        config_path=project / "configs/releases/v0.2_gate_e.json",
+        repository_root=PROJECT_ROOT,
+        base_python=FIXED_PYTHON,
+    )
+    guard = EnvironmentExecutionGuard(
+        root=layout.venv,
+        entry_count=1,
+        digest="d" * 64,
+    )
+    installed = InstalledEnvironmentEvidence(
+        project_version="0.2.0",
+        aquant_file=layout.venv / "site-packages/aquant/__init__.py",
+        sys_path=("site-packages",),
+        packages=(("a-share-quant", "0.2.0"),),
+        portfolio_cli=layout.venv / "bin/aquant-portfolio",
+        gate_e_cli=layout.venv / "bin/aquant-gate-e",
+        execution_guard=guard,
+    )
+    run_id = "c" * 64
+    artifact = output / "portfolios" / run_id
+    artifact.mkdir(parents=True)
+    observed = []
+
+    def controlled(_layout, command, **kwargs):
+        observed.append(kwargs["expected_execution_guard"])
+        if "run-config" in command:
+            payload = {
+                "artifact_directory": f"outputs/portfolios/{run_id}",
+                "run_id": run_id,
+                "status": "ok",
+                "symbol_count": 10,
+            }
+        else:
+            payload = {
+                "artifact_file_count": 13,
+                "artifact_manifest_sha256": "e" * 64,
+                "file_count": 13,
+                "payload_file_count": 12,
+                "run_id": run_id,
+                "status": "verified",
+                "trade_count": 0,
+            }
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        replay_module,
+        "run_sandboxed_with_environment_guard",
+        controlled,
+    )
+
+    observed_run_id, observed_artifact, _command = (
+        replay_module._run_portfolio_candidate(
+            replay,
+            layout,
+            installed,
+            config,
+            hash_seed="101",
+        )
+    )
+    replay_module._reverse_candidate(
+        replay,
+        layout,
+        installed,
+        config,
+        run_id=observed_run_id,
+        artifact=observed_artifact,
+        hash_seed="101",
+    )
+
+    assert observed == [guard, guard]
 
 
 def test_candidate_b_environment_stage_denies_writes_to_candidate_a(
@@ -1034,6 +1137,53 @@ def test_candidate_runtime_drift_fails_closed(monkeypatch):
         replay_module._verify_candidate_runtime(candidate)
 
     assert captured.value.code == "candidate_runtime_changed"
+
+
+def test_candidate_audit_holds_one_runtime_guard_for_the_full_audit(
+    monkeypatch,
+):
+    candidate = object()
+    replay = object()
+    runtime = {"python": {"sha256": "1" * 64}, "uv": {"sha256": "2" * 64}}
+    guards = {"python": object(), "uv": object()}
+    audited = object()
+    calls = []
+    monkeypatch.setattr(
+        replay_module,
+        "_verify_candidate_runtime",
+        lambda _candidate: runtime,
+    )
+    monkeypatch.setattr(
+        replay_module,
+        "_replay_from_candidate",
+        lambda _candidate: replay,
+    )
+    monkeypatch.setattr(
+        replay_module,
+        "_capture_runtime_controls",
+        lambda _replay: (runtime, guards),
+    )
+    monkeypatch.setattr(
+        replay_module,
+        "_audit_verified_candidate_once",
+        lambda _candidate, **_kwargs: audited,
+    )
+
+    def reject_restored_runtime(observed_replay, observed_guards):
+        calls.append((observed_replay, observed_guards))
+        raise GateEReplayError("candidate_runtime_changed")
+
+    monkeypatch.setattr(
+        replay_module,
+        "_verify_runtime_execution_guards",
+        reject_restored_runtime,
+    )
+
+    with pytest.raises(GateEReplayError) as captured:
+        replay_module._audit_verified_candidate(candidate)
+
+    assert captured.value.code == "candidate_runtime_changed"
+    assert calls == [(replay, guards)]
 
 
 def test_environment_b_cannot_run_before_anchor_pass(tmp_path):

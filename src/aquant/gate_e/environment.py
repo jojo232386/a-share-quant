@@ -39,6 +39,8 @@ _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _MAX_WHEEL_BYTES = 1024 * 1024 * 1024
 _MAX_MANIFEST_BYTES = 1024 * 1024
 _MAX_RUNTIME_BYTES = 1024 * 1024 * 1024
+_MAX_ENVIRONMENT_ENTRIES = 100_000
+_MAX_ENVIRONMENT_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
 _SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 _READ_ONLY_WRITE_OPERATION = "file-write*"
 _VERIFICATION_MODE_WRITE_OPERATIONS = (
@@ -122,12 +124,29 @@ class InstalledEnvironmentEvidence:
     packages: tuple[tuple[str, str], ...]
     portfolio_cli: Path
     gate_e_cli: Path | None
+    execution_guard: EnvironmentExecutionGuard
+
+
+@dataclass(frozen=True)
+class RuntimePathIdentity:
+    """One local object in an executable's symbolic-link chain."""
+
+    path: Path
+    device: int
+    inode: int
+    mode: int
+    nlink: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    link_target: str | None
 
 
 @dataclass(frozen=True)
 class RuntimeExecutionGuard:
-    """Device-local runtime file identity retained only in controller memory."""
+    """Device-local runtime identity retained only in controller memory."""
 
+    chain: tuple[RuntimePathIdentity, ...]
     path: Path
     device: int
     inode: int
@@ -135,6 +154,17 @@ class RuntimeExecutionGuard:
     mtime_ns: int
     ctime_ns: int
     sha256: str
+
+
+@dataclass(frozen=True)
+class EnvironmentExecutionGuard:
+    """Device-local identity retained only in memory for one sealed venv."""
+
+    root: Path
+    entry_count: int
+    digest: str
+    metadata_digest: str = ""
+    allowed_external_targets: tuple[Path, ...] = ()
 
 
 def _normalized_name(value: str) -> str:
@@ -370,10 +400,88 @@ def _runtime_file_unchanged(
     )
 
 
+def _runtime_path_chain(path: Path) -> tuple[RuntimePathIdentity, ...]:
+    current = Path(os.path.normpath(os.fspath(path)))
+    seen: set[Path] = set()
+    chain: list[RuntimePathIdentity] = []
+    try:
+        while True:
+            if current in seen or len(chain) >= 64:
+                raise GateEEnvironmentError(
+                    "runtime_execution_changed",
+                    "runtime executable changed during Gate E execution",
+                )
+            seen.add(current)
+            before = current.lstat()
+            if stat.S_ISLNK(before.st_mode):
+                link_target = os.readlink(current)
+            elif stat.S_ISREG(before.st_mode) and before.st_nlink == 1:
+                link_target = None
+            else:
+                raise GateEEnvironmentError(
+                    "runtime_execution_changed",
+                    "runtime executable changed during Gate E execution",
+                )
+            after = current.lstat()
+            after_target = (
+                os.readlink(current) if stat.S_ISLNK(after.st_mode) else None
+            )
+            identity = RuntimePathIdentity(
+                path=current,
+                device=after.st_dev,
+                inode=after.st_ino,
+                mode=after.st_mode,
+                nlink=after.st_nlink,
+                size=after.st_size,
+                mtime_ns=after.st_mtime_ns,
+                ctime_ns=after.st_ctime_ns,
+                link_target=after_target,
+            )
+            if (
+                (before.st_dev, before.st_ino)
+                != (after.st_dev, after.st_ino)
+                or before.st_mode != after.st_mode
+                or before.st_nlink != after.st_nlink
+                or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns
+                or before.st_ctime_ns != after.st_ctime_ns
+                or link_target != after_target
+            ):
+                raise GateEEnvironmentError(
+                    "runtime_execution_changed",
+                    "runtime executable changed during Gate E execution",
+                )
+            chain.append(identity)
+            if link_target is None:
+                break
+            target = Path(link_target)
+            current = Path(
+                os.path.normpath(
+                    os.fspath(
+                        target if target.is_absolute() else current.parent / target
+                    )
+                )
+            )
+    except GateEEnvironmentError:
+        raise
+    except OSError as exc:
+        raise GateEEnvironmentError(
+            "runtime_execution_changed",
+            "runtime executable changed during Gate E execution",
+        ) from exc
+    return tuple(chain)
+
+
 def capture_runtime_execution_guard(path: Path) -> RuntimeExecutionGuard:
-    """Bind the exact executable object used during one replay process."""
+    """Bind every symbolic-link hop and the exact executable bytes."""
     if not isinstance(path, Path):
         raise TypeError("path must be a Path")
+    if not path.is_absolute():
+        raise GateEEnvironmentError(
+            "runtime_execution_changed",
+            "runtime executable changed during Gate E execution",
+        )
+    chain_before = _runtime_path_chain(path)
     executable = _resolved_runtime_executable(
         os.fspath(path),
         code="runtime_execution_changed",
@@ -383,7 +491,14 @@ def capture_runtime_execution_guard(path: Path) -> RuntimeExecutionGuard:
         code="runtime_execution_changed",
         maximum_bytes=_MAX_RUNTIME_BYTES,
     )
+    chain_after = _runtime_path_chain(path)
+    if chain_before != chain_after:
+        raise GateEEnvironmentError(
+            "runtime_execution_changed",
+            "runtime executable changed during Gate E execution",
+        )
     return RuntimeExecutionGuard(
+        chain=chain_after,
         path=executable,
         device=metadata.st_dev,
         inode=metadata.st_ino,
@@ -413,6 +528,319 @@ def verify_runtime_execution_guard(
             "runtime_execution_changed",
             "runtime executable changed during Gate E execution",
         )
+
+
+def _environment_paths(root: Path) -> tuple[Path, ...]:
+    try:
+        root_metadata = root.lstat()
+        if root.is_symlink() or not stat.S_ISDIR(root_metadata.st_mode):
+            raise GateEEnvironmentError(
+                "environment_execution_changed",
+                "installed Gate E environment changed during execution",
+            )
+        paths = [root]
+        for current, directories, files in os.walk(
+            root,
+            topdown=True,
+            followlinks=False,
+        ):
+            directories.sort()
+            files.sort()
+            current_path = Path(current)
+            paths.extend(current_path / name for name in directories)
+            paths.extend(current_path / name for name in files)
+            if len(paths) > _MAX_ENVIRONMENT_ENTRIES:
+                raise GateEEnvironmentError(
+                    "environment_execution_changed",
+                    "installed Gate E environment exceeds its entry limit",
+                )
+    except GateEEnvironmentError:
+        raise
+    except OSError as exc:
+        raise GateEEnvironmentError(
+            "environment_execution_changed",
+            "installed Gate E environment changed during execution",
+        ) from exc
+    return tuple(
+        sorted(paths, key=lambda item: item.relative_to(root).as_posix())
+    )
+
+
+def _environment_path_metadata(
+    path: Path,
+    *,
+    root: Path,
+    include_content: bool,
+    allowed_external_targets: tuple[Path, ...],
+) -> dict[str, object]:
+    try:
+        metadata = path.lstat()
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        common: dict[str, object] = {
+            "ctime_ns": metadata.st_ctime_ns,
+            "device": metadata.st_dev,
+            "inode": metadata.st_ino,
+            "mode": metadata.st_mode,
+            "mtime_ns": metadata.st_mtime_ns,
+            "nlink": metadata.st_nlink,
+            "path": relative,
+            "size": metadata.st_size,
+        }
+        if not stat.S_ISLNK(metadata.st_mode) and metadata.st_mode & 0o222:
+            raise GateEEnvironmentError(
+                "environment_execution_changed",
+                "installed Gate E environment is not sealed read-only",
+            )
+        if stat.S_ISREG(metadata.st_mode):
+            if metadata.st_nlink != 1:
+                raise GateEEnvironmentError(
+                    "environment_execution_changed",
+                    "installed Gate E environment has a linked file",
+                )
+            if include_content:
+                content, final = _read_regular_single_link(
+                    path,
+                    code="environment_execution_changed",
+                    maximum_bytes=_MAX_RUNTIME_BYTES,
+                )
+            else:
+                content = b""
+                final = path.lstat()
+            common["kind"] = "file"
+            if include_content:
+                common["sha256"] = hashlib.sha256(content).hexdigest()
+            if (
+                (metadata.st_dev, metadata.st_ino)
+                != (final.st_dev, final.st_ino)
+                or metadata.st_mode != final.st_mode
+                or metadata.st_nlink != final.st_nlink
+                or metadata.st_size != final.st_size
+                or metadata.st_mtime_ns != final.st_mtime_ns
+                or metadata.st_ctime_ns != final.st_ctime_ns
+            ):
+                raise GateEEnvironmentError(
+                    "environment_execution_changed",
+                    "installed Gate E environment changed during execution",
+                )
+        elif stat.S_ISDIR(metadata.st_mode) and not path.is_symlink():
+            common["kind"] = "directory"
+        elif stat.S_ISLNK(metadata.st_mode):
+            common["kind"] = "symlink"
+            common["target"] = os.readlink(path)
+            resolved_target = path.resolve(strict=True)
+            if (
+                not resolved_target.is_relative_to(root)
+                and resolved_target not in allowed_external_targets
+            ):
+                raise GateEEnvironmentError(
+                    "environment_execution_changed",
+                    "installed Gate E environment has an external symlink",
+                )
+        else:
+            raise GateEEnvironmentError(
+                "environment_execution_changed",
+                "installed Gate E environment contains an unsafe object",
+            )
+        return common
+    except GateEEnvironmentError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise GateEEnvironmentError(
+            "environment_execution_changed",
+            "installed Gate E environment changed during execution",
+        ) from exc
+
+
+def capture_environment_execution_guard(
+    root: Path,
+    *,
+    allowed_external_targets: Sequence[Path] = (),
+) -> EnvironmentExecutionGuard:
+    """Bind every object and byte in one installed environment tree."""
+    if not isinstance(root, Path):
+        raise TypeError("root must be a Path")
+    if not root.is_absolute():
+        raise GateEEnvironmentError(
+            "environment_execution_changed",
+            "installed Gate E environment changed during execution",
+        )
+    if (
+        isinstance(allowed_external_targets, (str, bytes))
+        or not isinstance(allowed_external_targets, Sequence)
+    ):
+        raise TypeError("allowed_external_targets must be a path sequence")
+    normalized_targets: list[Path] = []
+    for target in allowed_external_targets:
+        if not isinstance(target, Path) or not target.is_absolute():
+            raise TypeError("allowed external targets must be absolute Paths")
+        try:
+            resolved_target = target.resolve(strict=True)
+        except OSError as exc:
+            raise GateEEnvironmentError(
+                "environment_execution_changed",
+                "installed Gate E environment target is unavailable",
+            ) from exc
+        _regular_single_link(
+            resolved_target,
+            code="environment_execution_changed",
+        )
+        normalized_targets.append(resolved_target)
+    normalized = tuple(sorted(set(normalized_targets), key=os.fspath))
+    paths = _environment_paths(root)
+    records = tuple(
+        _environment_path_metadata(
+            path,
+            root=root,
+            include_content=True,
+            allowed_external_targets=normalized,
+        )
+        for path in paths
+    )
+    total_bytes = sum(
+        int(record["size"])
+        for record in records
+        if record["kind"] == "file"
+    )
+    if total_bytes > _MAX_ENVIRONMENT_TOTAL_BYTES:
+        raise GateEEnvironmentError(
+            "environment_execution_changed",
+            "installed Gate E environment exceeds its size limit",
+        )
+    after_paths = _environment_paths(root)
+    if paths != after_paths:
+        raise GateEEnvironmentError(
+            "environment_execution_changed",
+            "installed Gate E environment changed during execution",
+        )
+    for path, record in zip(after_paths, records, strict=True):
+        observed = _environment_path_metadata(
+            path,
+            root=root,
+            include_content=False,
+            allowed_external_targets=normalized,
+        )
+        expected = {key: value for key, value in record.items() if key != "sha256"}
+        if observed != expected:
+            raise GateEEnvironmentError(
+                "environment_execution_changed",
+                "installed Gate E environment changed during execution",
+            )
+    encoded = json.dumps(
+        records,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    metadata_records = tuple(
+        {key: value for key, value in record.items() if key != "sha256"}
+        for record in records
+    )
+    metadata_encoded = json.dumps(
+        metadata_records,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return EnvironmentExecutionGuard(
+        root=root,
+        entry_count=len(records),
+        digest=hashlib.sha256(encoded).hexdigest(),
+        metadata_digest=hashlib.sha256(metadata_encoded).hexdigest(),
+        allowed_external_targets=normalized,
+    )
+
+
+def verify_environment_execution_guard(
+    root: Path,
+    expected: EnvironmentExecutionGuard,
+) -> None:
+    """Fail if any installed-environment object changed or was restored."""
+    if (
+        not isinstance(root, Path)
+        or type(expected) is not EnvironmentExecutionGuard
+    ):
+        raise TypeError("root and expected environment guard are invalid")
+    try:
+        paths = _environment_paths(root)
+        records = tuple(
+            _environment_path_metadata(
+                path,
+                root=root,
+                include_content=False,
+                allowed_external_targets=expected.allowed_external_targets,
+            )
+            for path in paths
+        )
+    except GateEEnvironmentError as exc:
+        raise GateEEnvironmentError(
+            "environment_execution_changed",
+            "installed Gate E environment changed during execution",
+        ) from exc
+    encoded = json.dumps(
+        records,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if (
+        root != expected.root
+        or len(records) != expected.entry_count
+        or hashlib.sha256(encoded).hexdigest() != expected.metadata_digest
+    ):
+        raise GateEEnvironmentError(
+            "environment_execution_changed",
+            "installed Gate E environment changed during execution",
+        )
+
+
+def seal_environment_execution_tree(
+    root: Path,
+    *,
+    allowed_external_targets: Sequence[Path] = (),
+) -> EnvironmentExecutionGuard:
+    """Remove write bits from a complete venv and capture its identity."""
+    paths = _environment_paths(root)
+    try:
+        for path in reversed(paths):
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                continue
+            if stat.S_ISDIR(metadata.st_mode):
+                mode = 0o555
+            elif stat.S_ISREG(metadata.st_mode):
+                mode = 0o555 if metadata.st_mode & 0o111 else 0o444
+            else:
+                raise GateEEnvironmentError(
+                    "environment_seal_failed",
+                    "installed Gate E environment contains an unsafe object",
+                )
+            path.chmod(mode, follow_symlinks=False)
+        sealed_paths = _environment_paths(root)
+        if sealed_paths != paths:
+            raise GateEEnvironmentError(
+                "environment_seal_failed",
+                "installed Gate E environment changed while being sealed",
+            )
+        for path in sealed_paths:
+            metadata = path.lstat()
+            if not stat.S_ISLNK(metadata.st_mode) and metadata.st_mode & 0o222:
+                raise GateEEnvironmentError(
+                    "environment_seal_failed",
+                    "installed Gate E environment remains writable",
+                )
+    except GateEEnvironmentError:
+        raise
+    except (NotImplementedError, OSError) as exc:
+        raise GateEEnvironmentError(
+            "environment_seal_failed",
+            "installed Gate E environment could not be sealed",
+        ) from exc
+    guard = capture_environment_execution_guard(
+        root,
+        allowed_external_targets=allowed_external_targets,
+    )
+    verify_environment_execution_guard(root, guard)
+    return guard
 
 
 def snapshot_python_runtime(path: Path) -> dict[str, object]:
@@ -1550,31 +1978,35 @@ def make_environment_layout(
             "environment_venv_failed",
             "Gate E venv could not be created",
         )
+    venv_python_guard = capture_runtime_execution_guard(python)
     try:
-        version_probe = subprocess.run(
-            _bootstrap_sandboxed_command(
-                [
-                    str(python),
-                    "-c",
-                    (
-                        "import sys;"
-                        "print('.'.join(str(value) for value in "
-                        "sys.version_info[:3]))"
-                    ),
-                ],
-                bootstrap_read_only,
-            ),
-            cwd=root,
-            env=_environment_values(layout, hash_seed="0"),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError as exc:
-        raise GateEEnvironmentError(
-            "environment_python_mismatch",
-            "Gate E venv Python version could not be verified",
-        ) from exc
+        try:
+            version_probe = subprocess.run(
+                _bootstrap_sandboxed_command(
+                    [
+                        str(python),
+                        "-c",
+                        (
+                            "import sys;"
+                            "print('.'.join(str(value) for value in "
+                            "sys.version_info[:3]))"
+                        ),
+                    ],
+                    bootstrap_read_only,
+                ),
+                cwd=root,
+                env=_environment_values(layout, hash_seed="0"),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            raise GateEEnvironmentError(
+                "environment_python_mismatch",
+                "Gate E venv Python version could not be verified",
+            ) from exc
+    finally:
+        verify_runtime_execution_guard(python, venv_python_guard)
     if (
         version_probe.returncode != 0
         or version_probe.stdout.strip() != "3.11.15"
@@ -1709,6 +2141,7 @@ def _environment_values(
         "PYTHONNOUSERSITE": "1",
         "TZ": "Asia/Shanghai",
         "UV_CACHE_DIR": str(layout.uv_cache),
+        "UV_LINK_MODE": "copy",
         "UV_OFFLINE": "1",
         "UV_PYTHON_DOWNLOADS": "never",
         "XDG_CACHE_HOME": str(layout.xdg_cache),
@@ -2156,9 +2589,19 @@ def inspect_installed_environment(
     hash_seed: str,
     require_gate_e_cli: bool = False,
     read_only_paths: Sequence[Path] = (),
+    expected_execution_guard: EnvironmentExecutionGuard | None = None,
 ) -> InstalledEnvironmentEvidence:
     """Prove imports, paths, package inventory and installed CLI entry points."""
     _verify_layout(layout)
+    if expected_execution_guard is None:
+        expected_execution_guard = capture_environment_execution_guard(
+            layout.venv,
+            allowed_external_targets=(layout.base_python,),
+        )
+    verify_environment_execution_guard(
+        layout.venv,
+        expected_execution_guard,
+    )
     script = (
         "import importlib.metadata as m,json,sys;"
         "from pathlib import Path;"
@@ -2171,9 +2614,10 @@ def inspect_installed_environment(
         "'sys_path':sys.path"
         "},sort_keys=True,separators=(',',':')))"
     )
-    completed = run_sandboxed(
+    completed = run_sandboxed_with_environment_guard(
         layout,
         [str(layout.python), "-c", script],
+        expected_execution_guard=expected_execution_guard,
         hash_seed=hash_seed,
         read_only_paths=read_only_paths,
     )
@@ -2250,9 +2694,10 @@ def inspect_installed_environment(
         portfolio_cli,
         code="environment_cli_missing",
     )
-    portfolio_help = run_sandboxed(
+    portfolio_help = run_sandboxed_with_environment_guard(
         layout,
         [str(portfolio_cli), "--help"],
+        expected_execution_guard=expected_execution_guard,
         hash_seed=hash_seed,
         read_only_paths=read_only_paths,
     )
@@ -2267,9 +2712,10 @@ def inspect_installed_environment(
             gate_e_cli,
             code="environment_cli_missing",
         )
-        gate_e_help = run_sandboxed(
+        gate_e_help = run_sandboxed_with_environment_guard(
             layout,
             [str(gate_e_cli), "--help"],
+            expected_execution_guard=expected_execution_guard,
             hash_seed=hash_seed,
             read_only_paths=read_only_paths,
         )
@@ -2278,6 +2724,10 @@ def inspect_installed_environment(
             code="environment_cli_missing",
             message="installed Gate E controller CLI is unavailable",
         )
+    verify_environment_execution_guard(
+        layout.venv,
+        expected_execution_guard,
+    )
     return InstalledEnvironmentEvidence(
         project_version=payload["project_version"],
         aquant_file=aquant_file,
@@ -2285,7 +2735,34 @@ def inspect_installed_environment(
         packages=packages,
         portfolio_cli=portfolio_cli,
         gate_e_cli=gate_e_cli if require_gate_e_cli else None,
+        execution_guard=expected_execution_guard,
     )
+
+
+def _run_with_runtime_guards(
+    layout: GateEEnvironmentLayout,
+    command: Sequence[str],
+    *,
+    runtime_guards: Sequence[tuple[Path, RuntimeExecutionGuard]],
+    hash_seed: str,
+    timeout_seconds: int = 120,
+    read_only_paths: Sequence[Path] = (),
+) -> subprocess.CompletedProcess[str]:
+    if not runtime_guards:
+        raise TypeError("runtime_guards must not be empty")
+    for runtime_path, runtime_guard in runtime_guards:
+        verify_runtime_execution_guard(runtime_path, runtime_guard)
+    try:
+        return run_sandboxed(
+            layout,
+            command,
+            hash_seed=hash_seed,
+            timeout_seconds=timeout_seconds,
+            read_only_paths=read_only_paths,
+        )
+    finally:
+        for runtime_path, runtime_guard in runtime_guards:
+            verify_runtime_execution_guard(runtime_path, runtime_guard)
 
 
 def _run_with_runtime_guard(
@@ -2298,17 +2775,57 @@ def _run_with_runtime_guard(
     timeout_seconds: int = 120,
     read_only_paths: Sequence[Path] = (),
 ) -> subprocess.CompletedProcess[str]:
-    verify_runtime_execution_guard(runtime_path, runtime_guard)
+    """Compatibility wrapper for one guarded runtime."""
+    return _run_with_runtime_guards(
+        layout,
+        command,
+        runtime_guards=((runtime_path, runtime_guard),),
+        hash_seed=hash_seed,
+        timeout_seconds=timeout_seconds,
+        read_only_paths=read_only_paths,
+    )
+
+
+def run_sandboxed_with_environment_guard(
+    layout: GateEEnvironmentLayout,
+    command: Sequence[str],
+    *,
+    expected_execution_guard: EnvironmentExecutionGuard,
+    hash_seed: str = "101",
+    timeout_seconds: int = 120,
+    read_only_paths: Sequence[Path] = (),
+    verification_mode_files: Sequence[Path] = (),
+) -> subprocess.CompletedProcess[str]:
+    """Run while the complete installed venv is immutable and verified."""
+    venv_python_guard = capture_runtime_execution_guard(layout.python)
+    verify_environment_execution_guard(
+        layout.venv,
+        expected_execution_guard,
+    )
     try:
         return run_sandboxed(
             layout,
             command,
             hash_seed=hash_seed,
             timeout_seconds=timeout_seconds,
-            read_only_paths=read_only_paths,
+            read_only_paths=(
+                *read_only_paths,
+                layout.venv,
+                venv_python_guard.path,
+            ),
+            verification_mode_files=verification_mode_files,
         )
     finally:
-        verify_runtime_execution_guard(runtime_path, runtime_guard)
+        try:
+            verify_runtime_execution_guard(
+                layout.python,
+                venv_python_guard,
+            )
+        finally:
+            verify_environment_execution_guard(
+                layout.venv,
+                expected_execution_guard,
+            )
 
 
 def install_gate_e_environment(
@@ -2389,7 +2906,13 @@ def install_gate_e_environment(
         resolved_uv,
         *read_only_paths,
     )
-    sync = _run_with_runtime_guard(
+    venv_python_guard = capture_runtime_execution_guard(layout.python)
+    guarded_runtimes = (
+        (resolved_uv, expected_uv_guard),
+        (layout.python, venv_python_guard),
+    )
+    sealed_paths = (*sealed_paths, venv_python_guard.path)
+    sync = _run_with_runtime_guards(
         layout,
         [
             str(resolved_uv),
@@ -2408,15 +2931,14 @@ def install_gate_e_environment(
         hash_seed=hash_seed,
         timeout_seconds=600,
         read_only_paths=sealed_paths,
-        runtime_path=resolved_uv,
-        runtime_guard=expected_uv_guard,
+        runtime_guards=guarded_runtimes,
     )
     _require_success(
         sync,
         code="environment_dependency_install_failed",
         message="sealed Gate E dependencies could not be installed",
     )
-    install = _run_with_runtime_guard(
+    install = _run_with_runtime_guards(
         layout,
         [
             str(resolved_uv),
@@ -2433,15 +2955,14 @@ def install_gate_e_environment(
         hash_seed=hash_seed,
         timeout_seconds=600,
         read_only_paths=sealed_paths,
-        runtime_path=resolved_uv,
-        runtime_guard=expected_uv_guard,
+        runtime_guards=guarded_runtimes,
     )
     _require_success(
         install,
         code="environment_project_install_failed",
         message="sealed Gate E project wheel could not be installed",
     )
-    check = _run_with_runtime_guard(
+    check = _run_with_runtime_guards(
         layout,
         [
             str(resolved_uv),
@@ -2452,8 +2973,7 @@ def install_gate_e_environment(
         ],
         hash_seed=hash_seed,
         read_only_paths=sealed_paths,
-        runtime_path=resolved_uv,
-        runtime_guard=expected_uv_guard,
+        runtime_guards=guarded_runtimes,
     )
     _require_success(
         check,
@@ -2478,9 +2998,15 @@ def install_gate_e_environment(
             "sealed Gate E installation inputs changed during install",
         )
     verify_runtime_execution_guard(resolved_uv, expected_uv_guard)
+    verify_runtime_execution_guard(layout.python, venv_python_guard)
+    execution_guard = seal_environment_execution_tree(
+        layout.venv,
+        allowed_external_targets=(layout.base_python,),
+    )
     return inspect_installed_environment(
         layout,
         hash_seed=hash_seed,
         require_gate_e_cli=require_gate_e_cli,
         read_only_paths=read_only_paths,
+        expected_execution_guard=execution_guard,
     )

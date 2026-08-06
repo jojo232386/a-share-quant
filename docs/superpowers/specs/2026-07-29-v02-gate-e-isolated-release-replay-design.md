@@ -360,7 +360,12 @@ PID、耗时或随机 UUID。上述原始环境证据只写入 bundle 外的独�
 - `uv.lock` SHA-256；
 - Python 3.11.15 与 uv 的设备无关内容快照，包括版本、大小和 SHA-256；
 - 仅在控制器内存中保留的 runtime inode、ctime、mtime 执行护栏，并在
-  Python 创建 venv 和每个 uv 安装子命令前后验证；
+  Python 创建 venv、版本探测、每个 uv 安装子命令和整段候选审计前后验证；
+- uv 使用复制模式安装；安装结束后拒绝普通文件硬链接和未获批准的外部
+  symlink，仅允许 venv 的 Python 链接最终指向已守卫的固定基础解释器；
+- 安装后的完整 venv 移除写位并绑定每个文件、目录、symlink、内容哈希及
+  inode/ctime/mtime 元数据。导入检查、CLI 运行、反向验真均在整棵 venv
+  的系统沙箱只读约束下执行，并在子进程前后复核同一内存护栏；
 - wheelhouse 每个文件的相对文件名、版本、大小和 SHA-256；
 - v0.1 tag commit 和冻结发布清单 SHA-256；
 - 完整 Gate E JSON 配置及其 SHA-256；

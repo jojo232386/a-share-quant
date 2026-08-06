@@ -44,10 +44,11 @@ from aquant.gate_e.environment import (
     inspect_project_wheel,
     install_gate_e_environment,
     make_environment_layout,
-    run_sandboxed,
+    run_sandboxed_with_environment_guard,
     snapshot_python_runtime,
     snapshot_uv_runtime,
     stage_environment_inputs,
+    verify_environment_execution_guard,
     verify_runtime_execution_guard,
     verify_wheelhouse,
     wheelhouse_requirements_from_manifest,
@@ -1348,9 +1349,10 @@ def _run_portfolio_candidate(
         "--config",
         _CONFIG_RELATIVE.as_posix(),
     )
-    completed = run_sandboxed(
+    completed = run_sandboxed_with_environment_guard(
         layout,
         command,
+        expected_execution_guard=installed.execution_guard,
         hash_seed=hash_seed,
         timeout_seconds=600,
         read_only_paths=(
@@ -1425,9 +1427,10 @@ def _reverse_candidate(
         "--expected-run-id",
         run_id,
     )
-    completed = run_sandboxed(
+    completed = run_sandboxed_with_environment_guard(
         layout,
         command,
+        expected_execution_guard=installed.execution_guard,
         hash_seed=hash_seed,
         timeout_seconds=600,
         read_only_paths=(
@@ -2240,7 +2243,7 @@ def _candidate_layout(
     )
 
 
-def _audit_verified_candidate(
+def _audit_verified_candidate_once(
     candidate: VerifiedCandidateEvidence,
     *,
     read_only_paths: tuple[Path, ...] = (),
@@ -2303,6 +2306,29 @@ def _audit_verified_candidate(
         raise GateEReplayError("candidate_evidence_mismatch")
     _verify_candidate_runtime(candidate)
     return accounting, input_audit, installed
+
+
+def _audit_verified_candidate(
+    candidate: VerifiedCandidateEvidence,
+    *,
+    read_only_paths: tuple[Path, ...] = (),
+) -> tuple[
+    GateEAccountingAudit,
+    GateEInputAudit,
+    InstalledEnvironmentEvidence,
+]:
+    runtime = _verify_candidate_runtime(candidate)
+    replay = _replay_from_candidate(candidate)
+    observed_runtime, runtime_guards = _capture_runtime_controls(replay)
+    if observed_runtime != runtime:
+        raise GateEReplayError("candidate_runtime_changed")
+    try:
+        return _audit_verified_candidate_once(
+            candidate,
+            read_only_paths=read_only_paths,
+        )
+    finally:
+        _verify_runtime_execution_guards(replay, runtime_guards)
 
 
 def audit_candidate(
@@ -2685,11 +2711,16 @@ def _execute_candidate_a_stage(
                     replay,
                     workspace=workspace,
                 ),
+                expected_execution_guard=installed.execution_guard,
             )
             if installed_after != installed:
                 raise GateEReplayError(
                     "installed_environment_changed"
                 )
+            verify_environment_execution_guard(
+                layout.venv,
+                installed.execution_guard,
+            )
             evidence_name = (
                 _CANDIDATE_EVIDENCE_NAME
                 if candidate == "A"

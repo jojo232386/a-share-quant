@@ -15,6 +15,7 @@ from aquant.gate_e.environment import (
     GateEEnvironmentError,
     GateEEnvironmentLayout,
     build_project_wheel,
+    capture_environment_execution_guard,
     capture_runtime_execution_guard,
     copy_gate_e_config,
     execution_environment,
@@ -23,7 +24,10 @@ from aquant.gate_e.environment import (
     make_environment_layout,
     run_controlled,
     run_sandboxed,
+    run_sandboxed_with_environment_guard,
+    seal_environment_execution_tree,
     stage_environment_inputs,
+    verify_environment_execution_guard,
     verify_runtime_execution_guard,
     verify_wheelhouse,
     write_wheelhouse_install_lock,
@@ -353,6 +357,172 @@ def test_runtime_guard_rejects_same_bytes_restored_after_mutation(tmp_path):
     assert captured.value.code == "runtime_execution_changed"
 
 
+def test_runtime_guard_rejects_restored_python_symlink(tmp_path):
+    target = tmp_path / "python-target"
+    shutil.copyfile(environment_module.canonical_python_executable(), target)
+    target.chmod(0o755)
+    intermediate = tmp_path / "python3.11"
+    intermediate.symlink_to(target.name)
+    executable = tmp_path / "python"
+    executable.symlink_to(intermediate.name)
+    guard = capture_runtime_execution_guard(executable)
+
+    intermediate.unlink()
+    intermediate.symlink_to(target.name)
+
+    with pytest.raises(GateEEnvironmentError) as captured:
+        verify_runtime_execution_guard(executable, guard)
+
+    assert captured.value.code == "runtime_execution_changed"
+
+
+def test_environment_guard_rejects_writable_tree(tmp_path):
+    venv = tmp_path / "venv"
+    venv.mkdir()
+    (venv / "module.py").write_bytes(b"value = 1\n")
+
+    with pytest.raises(GateEEnvironmentError) as captured:
+        capture_environment_execution_guard(venv)
+
+    assert captured.value.code == "environment_execution_changed"
+
+
+def test_environment_guard_rejects_unapproved_external_symlink(tmp_path):
+    external = tmp_path / "external"
+    external.write_bytes(b"external\n")
+    external.chmod(0o444)
+    venv = tmp_path / "venv"
+    venv.mkdir()
+    (venv / "escaped").symlink_to(external)
+    venv.chmod(0o555)
+
+    with pytest.raises(GateEEnvironmentError) as captured:
+        capture_environment_execution_guard(venv)
+
+    assert captured.value.code == "environment_execution_changed"
+
+
+def test_sealed_environment_guard_rejects_same_bytes_restored(tmp_path):
+    venv = tmp_path / "venv"
+    package = venv / "lib/python3.11/site-packages/aquant"
+    package.mkdir(parents=True)
+    module = package / "__init__.py"
+    module.write_bytes(b"VERSION = '0.2.0'\n")
+    executable = venv / "bin/aquant-portfolio"
+    executable.parent.mkdir()
+    executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+
+    guard = seal_environment_execution_tree(venv)
+
+    assert guard == capture_environment_execution_guard(venv)
+    assert not venv.stat().st_mode & 0o222
+    assert not module.stat().st_mode & 0o222
+    assert executable.stat().st_mode & 0o111
+    package.chmod(0o755)
+    module.chmod(0o644)
+    original = module.read_bytes()
+    module.unlink()
+    module.write_bytes(original)
+    module.chmod(0o444)
+    package.chmod(0o555)
+
+    with pytest.raises(GateEEnvironmentError) as captured:
+        verify_environment_execution_guard(venv, guard)
+
+    assert captured.value.code == "environment_execution_changed"
+
+
+def test_sealed_environment_guard_rejects_added_then_removed_empty_dir(
+    tmp_path,
+):
+    venv = tmp_path / "venv"
+    package = venv / "site-packages"
+    package.mkdir(parents=True)
+    (package / "module.py").write_bytes(b"value = 1\n")
+    guard = seal_environment_execution_tree(venv)
+
+    venv.chmod(0o755)
+    extra = venv / "temporary-empty"
+    extra.mkdir()
+    extra.rmdir()
+    venv.chmod(0o555)
+
+    with pytest.raises(GateEEnvironmentError) as captured:
+        verify_environment_execution_guard(venv, guard)
+
+    assert captured.value.code == "environment_execution_changed"
+
+
+def test_environment_guard_wraps_command_and_rejects_restoration(
+    tmp_path,
+    monkeypatch,
+):
+    venv = tmp_path / "venv"
+    package = venv / "site-packages"
+    package.mkdir(parents=True)
+    module = package / "aquant.py"
+    module.write_bytes(b"value = 1\n")
+    base_python = environment_module.canonical_python_executable()
+    python = venv / "bin/python"
+    python.parent.mkdir()
+    python.symlink_to(base_python)
+    guard = seal_environment_execution_tree(
+        venv,
+        allowed_external_targets=(base_python,),
+    )
+    observed_read_only = []
+
+    def mutate_then_restore(*_args, **kwargs):
+        observed_read_only.extend(kwargs["read_only_paths"])
+        venv.chmod(0o755)
+        package.chmod(0o755)
+        module.chmod(0o644)
+        original = module.read_bytes()
+        module.unlink()
+        module.write_bytes(original)
+        module.chmod(0o444)
+        package.chmod(0o555)
+        venv.chmod(0o555)
+        return environment_module.subprocess.CompletedProcess(
+            args=["probe"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        environment_module,
+        "run_sandboxed",
+        mutate_then_restore,
+    )
+    layout = environment_module.GateEEnvironmentLayout(
+        root=tmp_path,
+        home=tmp_path / "home",
+        xdg_cache=tmp_path / "cache",
+        uv_cache=tmp_path / "uv-cache",
+        venv=venv,
+        python=python,
+        project_root=tmp_path / "project",
+        input_root=tmp_path / "project",
+        output_root=tmp_path / "project/outputs",
+        config_path=tmp_path / "project/config.json",
+        repository_root=PROJECT_ROOT,
+        base_python=base_python,
+    )
+
+    with pytest.raises(GateEEnvironmentError) as captured:
+        run_sandboxed_with_environment_guard(
+            layout,
+            ["probe"],
+            expected_execution_guard=guard,
+        )
+
+    assert captured.value.code == "environment_execution_changed"
+    assert venv in observed_read_only
+    assert base_python in observed_read_only
+
+
 def test_guarded_subprocess_rejects_runtime_mutation_then_restore(
     tmp_path,
     monkeypatch,
@@ -428,6 +598,7 @@ def test_execution_environment_is_an_allowlist(tmp_path, monkeypatch):
         "PYTHONNOUSERSITE": "1",
         "TZ": "Asia/Shanghai",
         "UV_CACHE_DIR": str(layout.uv_cache),
+        "UV_LINK_MODE": "copy",
         "UV_OFFLINE": "1",
         "UV_PYTHON_DOWNLOADS": "never",
         "XDG_CACHE_HOME": str(layout.xdg_cache),
