@@ -85,14 +85,30 @@ def _weekday_sessions() -> tuple[date, ...]:
         current += timedelta(days=1)
     if len(weekdays) - _SYNTHETIC_NON_SESSION_COUNT != _SESSION_COUNT:
         raise RuntimeError("synthetic_fixture_session_count_mismatch")
-    candidates = weekdays[1:-1]
+    required_sessions = {
+        _START,
+        date(2026, 7, 23),
+        _END,
+    }
+    candidate_indices = [
+        index
+        for index, value in enumerate(weekdays)
+        if value not in required_sessions
+    ]
     removal_positions = {
-        index * (len(candidates) - 1) // (_SYNTHETIC_NON_SESSION_COUNT - 1)
+        index
+        * (len(candidate_indices) - 1)
+        // (_SYNTHETIC_NON_SESSION_COUNT - 1)
         for index in range(_SYNTHETIC_NON_SESSION_COUNT)
     }
+    removed_indices = {
+        candidate_indices[position]
+        for position in removal_positions
+    }
     sessions = tuple(
-        value for index, value in enumerate(weekdays) if index == 0 or index == len(weekdays) - 1
-        or index - 1 not in removal_positions
+        value
+        for index, value in enumerate(weekdays)
+        if index not in removed_indices
     )
     if len(sessions) != _SESSION_COUNT:
         raise RuntimeError("synthetic_fixture_session_count_mismatch")

@@ -90,6 +90,8 @@ def test_public_fixture_inputs_are_deterministic_auditable_and_not_market_data(t
         date.fromisoformat(value)
         for value in json.loads(calendar_document.read_text(encoding="utf-8"))["dates"]
     }
+    assert date(2026, 7, 23) in calendar_dates
+    assert date(2026, 7, 24) in calendar_dates
     action_records = read_corporate_action_manifest(tmp_path / "left" / "inputs")
     assert all(
         event.payable_date in calendar_dates
