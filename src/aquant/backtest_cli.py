@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 from collections.abc import Sequence
@@ -17,6 +16,7 @@ from aquant.backtest import (
     load_verified_snapshot,
     run_backtest,
 )
+from aquant.cli_support import make_safe_argument_parser, path_beneath, write_json
 from aquant.data.calendar_snapshot import CalendarSnapshotStore, load_verified_calendar
 from aquant.data.corporate_actions import (
     load_verified_corporate_actions,
@@ -35,17 +35,18 @@ class BacktestCliError(RuntimeError):
         super().__init__(message)
 
 
-class _SafeArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
-        raise BacktestCliError("invalid_arguments", "command arguments are invalid")
+_SAFE_ARGUMENT_PARSER = make_safe_argument_parser(
+    error_factory=BacktestCliError,
+    invalid_arguments_message="command arguments are invalid",
+)
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = _SafeArgumentParser(prog="aquant-backtest")
+    parser = _SAFE_ARGUMENT_PARSER(prog="aquant-backtest")
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        parser_class=_SafeArgumentParser,
+        parser_class=_SAFE_ARGUMENT_PARSER,
     )
     run = subparsers.add_parser("run", help="run one explicit immutable data snapshot")
     run.add_argument("--project-root", default=".")
@@ -72,22 +73,6 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _path_beneath(root: Path, value: str, *, label: str) -> Path:
-    candidate = Path(value)
-    path = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
-    try:
-        path.relative_to(root)
-    except ValueError as exc:
-        raise BacktestCliError("unsafe_path", f"{label} must stay beneath project root") from exc
-    return path
-
-
-def _write_json(stream, payload: dict[str, object]) -> None:
-    stream.write(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
-    )
-
-
 def _decimal_argument(value: str) -> Decimal:
     if type(value) is not str or re.fullmatch(r"(?:0|[1-9][0-9]*)\.[0-9]+", value) is None:
         raise BacktestCliError("invalid_arguments", "decimal command argument is invalid")
@@ -112,8 +97,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "invalid_arguments",
                 "universe ID must be a lowercase SHA-256 value",
             )
-        manifest_path = _path_beneath(project_root, args.manifest, label="manifest")
-        output_root = _path_beneath(project_root, args.output, label="output")
+        manifest_path = path_beneath(
+            project_root,
+            args.manifest,
+            label="manifest",
+            error_factory=BacktestCliError,
+        )
+        output_root = path_beneath(
+            project_root,
+            args.output,
+            label="output",
+            error_factory=BacktestCliError,
+        )
         matches = tuple(
             record
             for record in ManifestWriter(manifest_path).read_all()
@@ -186,7 +181,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         artifact_directory = export_backtest_result(result, output_root)
         relative_artifact = artifact_directory.relative_to(project_root).as_posix()
     except Exception as exc:
-        _write_json(
+        write_json(
             sys.stderr,
             {
                 "status": "error",
@@ -196,7 +191,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
-    _write_json(
+    write_json(
         sys.stdout,
         {
             "status": "ok",

@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
+from aquant.cli_support import make_safe_argument_parser, path_beneath, write_json
 from aquant.data.calendar_snapshot import CalendarSnapshotStore, load_verified_calendar
 from aquant.research.week5 import (
     Week5Error,
@@ -30,17 +31,18 @@ class ExperimentCliError(RuntimeError):
         super().__init__(message)
 
 
-class _SafeArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
-        raise ExperimentCliError("invalid_arguments", "experiment arguments are invalid")
+_SAFE_ARGUMENT_PARSER = make_safe_argument_parser(
+    error_factory=ExperimentCliError,
+    invalid_arguments_message="experiment arguments are invalid",
+)
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = _SafeArgumentParser(prog="aquant-experiment")
+    parser = _SAFE_ARGUMENT_PARSER(prog="aquant-experiment")
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        parser_class=_SafeArgumentParser,
+        parser_class=_SAFE_ARGUMENT_PARSER,
     )
     run = subparsers.add_parser("run", help="run the restricted Week 5 experiment")
     run.add_argument("--project-root", default=".")
@@ -54,28 +56,6 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--periods", default="10,20,60")
     run.add_argument("--replay-days", type=int, default=10)
     return parser
-
-
-def _path_beneath(root: Path, value: str, *, label: str) -> Path:
-    candidate = Path(value)
-    path = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
-    try:
-        path.relative_to(root)
-    except ValueError as exc:
-        raise ExperimentCliError("unsafe_path", f"{label} must stay beneath project root") from exc
-    return path
-
-
-def _write_json(stream, payload: dict[str, object]) -> None:
-    stream.write(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-    )
 
 
 def _parse_periods(value: str) -> tuple[int, ...]:
@@ -155,9 +135,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         periods = _parse_periods(args.periods)
         train_end = date.fromisoformat(args.train_end)
         holdout_start = date.fromisoformat(args.holdout_start)
-        candidate_root = _path_beneath(project_root, args.candidate_root, label="candidate root")
-        baseline_root = _path_beneath(project_root, args.baseline_root, label="baseline root")
-        output_root = _path_beneath(project_root, args.output, label="output root")
+        candidate_root = path_beneath(
+            project_root,
+            args.candidate_root,
+            label="candidate root",
+            error_factory=ExperimentCliError,
+        )
+        baseline_root = path_beneath(
+            project_root,
+            args.baseline_root,
+            label="baseline root",
+            error_factory=ExperimentCliError,
+        )
+        output_root = path_beneath(
+            project_root,
+            args.output,
+            label="output root",
+            error_factory=ExperimentCliError,
+        )
         universe = load_verified_universe(
             project_root / "configs" / "universes" / f"{args.universe_id}.json",
             expected_id=args.universe_id,
@@ -228,7 +223,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         directory = publish_week5_report(report, output_root)
         relative = directory.relative_to(project_root).as_posix()
     except (ValueError, Week5Error) as exc:
-        _write_json(
+        write_json(
             sys.stderr,
             {
                 "error_code": getattr(exc, "code", "operation_failed"),
@@ -238,7 +233,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
     except Exception as exc:
-        _write_json(
+        write_json(
             sys.stderr,
             {
                 "error_code": getattr(exc, "code", "operation_failed"),
@@ -247,7 +242,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
         )
         return 1
-    _write_json(
+    write_json(
         sys.stdout,
         {
             "experiment_directory": relative,

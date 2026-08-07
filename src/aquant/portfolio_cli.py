@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import stat
@@ -15,6 +14,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 
 from aquant.backtest import load_verified_snapshot
+from aquant.cli_support import make_safe_argument_parser, write_json
 from aquant.data.calendar_snapshot import (
     CalendarSnapshotStore,
     load_verified_calendar,
@@ -65,20 +65,18 @@ class PortfolioCliError(RuntimeError):
         super().__init__(message)
 
 
-class _SafeArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
-        raise PortfolioCliError(
-            "invalid_arguments",
-            "portfolio command arguments are invalid",
-        )
+_SAFE_ARGUMENT_PARSER = make_safe_argument_parser(
+    error_factory=PortfolioCliError,
+    invalid_arguments_message="portfolio command arguments are invalid",
+)
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = _SafeArgumentParser(prog="aquant-portfolio")
+    parser = _SAFE_ARGUMENT_PARSER(prog="aquant-portfolio")
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        parser_class=_SafeArgumentParser,
+        parser_class=_SAFE_ARGUMENT_PARSER,
     )
     run = subparsers.add_parser(
         "run",
@@ -124,18 +122,6 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--artifact", required=True)
     verify.add_argument("--expected-run-id")
     return parser
-
-
-def _write_json(stream, payload: dict[str, object]) -> None:
-    stream.write(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-    )
 
 
 def _relative_parts(value: object) -> tuple[str, ...]:
@@ -697,7 +683,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "portfolio command is unsupported",
             )
     except Exception as exc:
-        _write_json(
+        write_json(
             sys.stderr,
             {
                 "error_code": getattr(exc, "code", "operation_failed"),
@@ -706,7 +692,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
         )
         return 1
-    _write_json(sys.stdout, payload)
+    write_json(sys.stdout, payload)
     return 0
 
 

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
 
+from aquant.cli_support import make_safe_argument_parser, write_json
 from aquant.release_replay import ProgressEvent, verify_release
 
 
@@ -20,17 +20,22 @@ class ReleaseCliError(RuntimeError):
         super().__init__(code)
 
 
-class _SafeArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
-        raise ReleaseCliError("invalid_arguments")
+def _release_cli_error(code: str, message: str) -> ReleaseCliError:
+    return ReleaseCliError(code)
+
+
+_SAFE_ARGUMENT_PARSER = make_safe_argument_parser(
+    error_factory=_release_cli_error,
+    invalid_arguments_message="",
+)
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = _SafeArgumentParser(prog="aquant-release")
+    parser = _SAFE_ARGUMENT_PARSER(prog="aquant-release")
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        parser_class=_SafeArgumentParser,
+        parser_class=_SAFE_ARGUMENT_PARSER,
     )
     verify = subparsers.add_parser(
         "verify",
@@ -40,20 +45,8 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _write_json(stream, payload: dict[str, object]) -> None:
-    stream.write(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-    )
-
-
 def _progress(event: ProgressEvent) -> None:
-    _write_json(
+    write_json(
         sys.stderr,
         {
             "completed": event.completed,
@@ -82,7 +75,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             progress=_progress,
         )
     except Exception as exc:
-        _write_json(
+        write_json(
             sys.stderr,
             {
                 "error_code": getattr(exc, "code", "operation_failed"),
@@ -92,7 +85,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
-    _write_json(
+    write_json(
         sys.stdout,
         {
             "baseline_run_count": summary.baseline_run_count,
