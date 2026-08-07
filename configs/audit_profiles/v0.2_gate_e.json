@@ -1,0 +1,10 @@
+{
+  "approval_commit": "e2eef971a6b42e0a9e2ae172da5ceac646f431ef",
+  "audit_tag": "v0.2-gate-e-public-audit",
+  "audit_tag_target": "577c157235cac50e0ab721a7c845b0f0836aa15b",
+  "historical_entry": "candidate-a",
+  "release_version": "v0.2",
+  "schema_version": "1.0",
+  "trust_anchor_commit": "cc0a7c69c6a46cd86d8c42cdfe52efe64a20bfe6",
+  "trust_manifest": "release/v0.2-gate-e/trust_manifest.json"
+}
