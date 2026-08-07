@@ -9,6 +9,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from aquant.cli_support import make_safe_argument_parser, path_beneath, write_json
 from aquant.reporting import (
     build_independent_batch_report,
     load_audited_run_metrics,
@@ -26,20 +27,18 @@ class ReportCliError(RuntimeError):
         super().__init__(message)
 
 
-class _SafeArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
-        raise ReportCliError(
-            "invalid_arguments",
-            "report command arguments are invalid",
-        )
+_SAFE_ARGUMENT_PARSER = make_safe_argument_parser(
+    error_factory=ReportCliError,
+    invalid_arguments_message="report command arguments are invalid",
+)
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = _SafeArgumentParser(prog="aquant-report")
+    parser = _SAFE_ARGUMENT_PARSER(prog="aquant-report")
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        parser_class=_SafeArgumentParser,
+        parser_class=_SAFE_ARGUMENT_PARSER,
     )
     build = subparsers.add_parser(
         "build",
@@ -60,35 +59,6 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--backtests", default="outputs/backtests")
     verify.add_argument("--reports", default="outputs/reports")
     return parser
-
-
-def _path_beneath(root: Path, value: str, *, label: str) -> Path:
-    candidate = Path(value)
-    path = (
-        candidate.resolve()
-        if candidate.is_absolute()
-        else (root / candidate).resolve()
-    )
-    try:
-        path.relative_to(root)
-    except ValueError as exc:
-        raise ReportCliError(
-            "unsafe_path",
-            f"{label} must stay beneath project root",
-        ) from exc
-    return path
-
-
-def _write_json(stream, payload: dict[str, object]) -> None:
-    stream.write(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-    )
 
 
 def _candidate_directories(root: Path, universe_id: str) -> tuple[Path, ...]:
@@ -129,15 +99,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "invalid_arguments",
                     "report ID must be a lowercase SHA-256 value",
                 )
-            backtest_root = _path_beneath(
+            backtest_root = path_beneath(
                 project_root,
                 args.backtests,
                 label="backtest root",
+                error_factory=ReportCliError,
             )
-            report_root = _path_beneath(
+            report_root = path_beneath(
                 project_root,
                 args.reports,
                 label="report root",
+                error_factory=ReportCliError,
             )
             verification = verify_published_risk_report(
                 report_root / args.report_id,
@@ -155,15 +127,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "invalid_arguments",
                     "universe ID must be a lowercase SHA-256 value",
                 )
-            backtest_root = _path_beneath(
+            backtest_root = path_beneath(
                 project_root,
                 args.backtests,
                 label="backtest root",
+                error_factory=ReportCliError,
             )
-            output_root = _path_beneath(
+            output_root = path_beneath(
                 project_root,
                 args.output,
                 label="report output",
+                error_factory=ReportCliError,
             )
             universe = load_verified_universe(
                 project_root
@@ -198,7 +172,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "universe_id": args.universe_id,
             }
     except Exception as exc:
-        _write_json(
+        write_json(
             sys.stderr,
             {
                 "error_code": getattr(exc, "code", "operation_failed"),
@@ -207,7 +181,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
         )
         return 1
-    _write_json(sys.stdout, success_payload)
+    write_json(sys.stdout, success_payload)
     return 0
 
 
