@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from aquant.cli_support import write_json
 from aquant.config import load_data_config
 from aquant.data.akshare_client import AkshareClient
 from aquant.data.calendar_snapshot import CalendarSnapshotStore
@@ -103,12 +103,6 @@ def _corporate_action_summary(
     }
 
 
-def _write_json(stream, payload: dict[str, object]) -> None:
-    stream.write(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
-    )
-
-
 def main(argv: Sequence[str] | None = None, *, services: CliServices | None = None) -> int:
     """Run the CLI and return a process exit code without exposing exception text."""
     args = _parser().parse_args(argv)
@@ -144,7 +138,7 @@ def main(argv: Sequence[str] | None = None, *, services: CliServices | None = No
             )
             summary = _corporate_action_summary(result)
     except Exception as exc:
-        _write_json(
+        write_json(
             sys.stderr,
             {
                 "status": "error",
@@ -153,7 +147,7 @@ def main(argv: Sequence[str] | None = None, *, services: CliServices | None = No
             },
         )
         return 1
-    _write_json(sys.stdout, summary)
+    write_json(sys.stdout, summary)
     return 0
 
 
