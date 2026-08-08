@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import decimal
+from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal
 
@@ -271,30 +272,86 @@ def test_sma_active_weight_boundaries_accepted():
     assert SmaSignal(period=2, active_weight=Decimal("1")).compute(data.as_of, data) == {
         _SYMBOL: Decimal("1")
     }
-    assert SmaSignal(period=2, active_weight=Decimal("0")).compute(data.as_of, data) == {
-        _SYMBOL: Decimal("0")
-    }
 
 
-def test_sma_multi_symbol_omission_is_not_silent_zero():
+def test_sma_active_weight_zero_rejected():
+    # Decimal("0") would collapse the ACTIVE classification into FLAT and
+    # break the three-state contract, so it must fail closed at construction.
+    with pytest.raises(SignalError) as exc:
+        SmaSignal(period=2, active_weight=Decimal("0"))
+    assert exc.value.code == "invalid_active_weight"
+
+
+def test_sma_multi_symbol_input_fails_closed():
+    # Two simultaneously ACTIVE symbols would both emit Decimal("0.95") and
+    # exceed the total explicit weight of one; SmaSignal is a single-symbol
+    # compatibility signal, so the input is rejected before any output is
+    # generated. The failure must never be the incidental
+    # total_weight_above_one raised by validate_signal_output.
     per_symbol = {
         "600519": _observations(10.0, 20.0),  # ACTIVE
-        "000001": _observations(20.0, 10.0),  # FLAT -> explicit zero
-        "000858": _observations(5.0),  # insufficient history -> OMIT
+        "000001": _observations(10.0, 20.0),  # ACTIVE (0.95 + 0.95 > 1)
+        "000858": _observations(5.0),  # insufficient history
     }
     data = SignalInput(as_of=date(2026, 1, 7), per_symbol=per_symbol)
-    result = SmaSignal(period=2).compute(data.as_of, data)
-    assert result == {"600519": Decimal("0.95"), "000001": Decimal("0")}
-    assert "000858" not in result
-    assert set(result) <= set(data.symbols)
+    with pytest.raises(SignalError) as exc:
+        SmaSignal(period=2).compute(data.as_of, data)
+    assert exc.value.code == "single_symbol_only"
+    # The same input is legal for a multi-symbol signal; only SmaSignal rejects it.
+    assert set(TopKMomentumSignal(lookback=1, k=2).compute(data.as_of, data)) <= set(
+        data.symbols
+    )
 
 
 # ---------------------------------------------------------------------------
-# C. Canonical baseline signal-state equivalence (public v01 fixture)
+# C. Canonical baseline classification equivalence (public v01 fixture)
 # ---------------------------------------------------------------------------
 
 
-def test_sma_signal_state_equivalence_with_public_fixture_baseline(tmp_path_factory):
+def baseline_sma_oracle(period: int, chronological: Sequence[float]) -> str:
+    """Frozen SmaStrategy classification semantics (independent of SmaSignal).
+
+    Direct transcription of the audited ``SmaStrategy._apply_signal`` math in
+    ``src/aquant/backtest/strategies.py``::
+
+        closes = [float(indicator[-offset]) for offset in range(period)]
+        sma = sum(closes) / period
+        close = float(indicator[0])
+
+    ``indicator[0]`` is the current bar (newest) and ``indicator[-offset]``
+    walks newest -> oldest; ``chronological`` is the same series ordered
+    oldest -> newest, so ``chronological[-1 - offset]`` is ``indicator[-offset]``.
+    The oracle keeps every frozen detail: indicator_close consumption, float
+    semantics, current bar included, newest -> oldest summation order, Python
+    built-in ``sum``, plain division by ``period``, and
+    ``close == sma -> NO_DECISION``.
+    """
+    if len(chronological) < period:
+        return "NO_DECISION"
+    window = [float(chronological[-1 - offset]) for offset in range(period)]
+    sma = sum(window) / period
+    close = float(chronological[-1])
+    if close > sma:
+        return "ACTIVE"
+    if close < sma:
+        return "FLAT"
+    return "NO_DECISION"
+
+
+def _signal_state(output: Mapping[str, Decimal], symbol: str) -> str:
+    if symbol not in output:
+        return "NO_DECISION"
+    return "ACTIVE" if output[symbol] > 0 else "FLAT"
+
+
+@pytest.fixture(scope="module")
+def baseline_runs(tmp_path_factory):
+    """Run the audited single-instrument baseline once per symbol x period.
+
+    The backtests dominate runtime (~35s for 30 runs); caching them here lets
+    the oracle-equivalence and order/position-compatibility tests share one
+    set of evidence instead of running the baseline twice.
+    """
     root = tmp_path_factory.mktemp("public-v01")
     inputs = build_public_v01_inputs(root)
     records = ManifestWriter(root / "inputs" / "data" / "manifests" / "manifest.jsonl").read_all()
@@ -314,7 +371,7 @@ def test_sma_signal_state_equivalence_with_public_fixture_baseline(tmp_path_fact
     )
     fee_policy = default_fee_policy()
 
-    compared = 0
+    runs = []
     for period in (10, 20, 60):
         for symbol in inputs.symbols:
             market_data = load_verified_snapshot(
@@ -340,55 +397,113 @@ def test_sma_signal_state_equivalence_with_public_fixture_baseline(tmp_path_fact
             )
             feed = derive_price_streams(market_data.frame, corporate_actions)
             sessions = [value.date() for value in feed["date"]]
+            indicator_closes = [float(value) for value in feed["indicator_close"]]
             observations = tuple(
-                SignalObservation(session=session, indicator_close=float(value))
-                for session, value in zip(sessions, feed["indicator_close"], strict=True)
+                SignalObservation(session=session, indicator_close=value)
+                for session, value in zip(sessions, indicator_closes, strict=True)
             )
             data = SignalInput(as_of=sessions[-1], per_symbol={symbol: observations})
-            signal = SmaSignal(period=period)
-            orders = {order.signal_date: order.side for order in result.orders}
-            positions = {position.date: position.size for position in result.positions}
+            runs.append(
+                {
+                    "period": period,
+                    "symbol": symbol,
+                    "sessions": sessions,
+                    "observations": observations,
+                    "data": data,
+                    "orders": {order.signal_date: order.side for order in result.orders},
+                    "positions": {
+                        position.date: position.size for position in result.positions
+                    },
+                }
+            )
+    return tuple(runs)
 
-            for session in sessions:
-                output = signal.compute(session, data)
-                state = (
-                    "NO_DECISION"
-                    if symbol not in output
-                    else ("ACTIVE" if output[symbol] > 0 else "FLAT")
-                )
-                side = orders.get(session)
-                size = positions[session]
-                if side == "buy":
-                    assert state == "ACTIVE", (period, symbol, session, state, side)
-                elif side == "sell":
-                    assert state == "FLAT", (period, symbol, session, state, side)
+
+def test_sma_classification_sequence_equals_baseline_oracle(baseline_runs):
+    """Per-point classification equivalence against the frozen baseline oracle.
+
+    For every symbol x period x session the signal state must equal the
+    baseline oracle state exactly; no order/position proxy is involved.
+    """
+    compared = 0
+    for run in baseline_runs:
+        signal = SmaSignal(period=run["period"])
+        for session in run["sessions"]:
+            history = tuple(o for o in run["observations"] if o.session <= session)
+            oracle_state = baseline_sma_oracle(
+                run["period"],
+                [o.indicator_close for o in history],
+            )
+            output = signal.compute(session, run["data"])
+            signal_state = _signal_state(output, run["symbol"])
+            assert signal_state == oracle_state, (
+                run["period"],
+                run["symbol"],
+                session,
+                signal_state,
+                oracle_state,
+            )
+            compared += 1
+    # 10 symbols x 3 periods x ~2071 sessions = 62,136 comparison points.
+    assert compared == 62_136
+
+
+def test_sma_order_position_compatibility_with_baseline(baseline_runs):
+    """Additional compatibility check (not classification-equivalence evidence).
+
+    The audited baseline turns classifications into orders only on state
+    transitions, so its order/position ledger is a filtered view of the
+    classification sequence. This test verifies the signal never contradicts
+    the observable baseline behavior; classification-sequence equivalence is
+    itself proven point-by-point in
+    ``test_sma_classification_sequence_equals_baseline_oracle``.
+    """
+    for run in baseline_runs:
+        signal = SmaSignal(period=run["period"])
+        for session in run["sessions"]:
+            output = signal.compute(session, run["data"])
+            state = _signal_state(output, run["symbol"])
+            side = run["orders"].get(session)
+            size = run["positions"][session]
+            if side == "buy":
+                assert state == "ACTIVE", (run["period"], run["symbol"], session, state, side)
+            elif side == "sell":
+                assert state == "FLAT", (run["period"], run["symbol"], session, state, side)
+            else:
+                if size > 0:
+                    assert state != "FLAT", (
+                        run["period"],
+                        run["symbol"],
+                        session,
+                        state,
+                        size,
+                    )
                 else:
-                    if size > 0:
-                        assert state != "FLAT", (period, symbol, session, state, size)
-                    else:
-                        assert state != "ACTIVE", (period, symbol, session, state, size)
-                # Reverse: an emitted classification must have been acted on.
-                if state == "ACTIVE":
-                    assert size > 0 or side == "buy", (
-                        period,
-                        symbol,
+                    assert state != "ACTIVE", (
+                        run["period"],
+                        run["symbol"],
                         session,
                         state,
                         size,
-                        side,
                     )
-                if state == "FLAT":
-                    assert size == 0 or side == "sell", (
-                        period,
-                        symbol,
-                        session,
-                        state,
-                        size,
-                        side,
-                    )
-                compared += 1
-    # The full public fixture covers 10 symbols x 3 periods x ~2071 bars.
-    assert compared >= 60_000
+            if state == "ACTIVE":
+                assert size > 0 or side == "buy", (
+                    run["period"],
+                    run["symbol"],
+                    session,
+                    state,
+                    size,
+                    side,
+                )
+            if state == "FLAT":
+                assert size == 0 or side == "sell", (
+                    run["period"],
+                    run["symbol"],
+                    session,
+                    state,
+                    size,
+                    side,
+                )
 
 
 # ---------------------------------------------------------------------------

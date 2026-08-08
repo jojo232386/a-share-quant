@@ -223,15 +223,31 @@ class SmaSignal:
       a liquidation signal
     - history shorter than ``period`` is NO_DECISION (symbol omitted)
 
+    This is a single-symbol compatibility signal: it reproduces the audited
+    single-instrument ``SmaStrategy`` classification semantics and emits its
+    fixed ``active_weight`` unchanged. Multi-symbol inputs fail closed with
+    ``SignalError("single_symbol_only", ...)`` before any output is generated;
+    the explicit-weight total contract therefore can never be violated by this
+    signal itself. Portfolio-level multi-symbol target weights belong to the
+    later planner scope (A2), not to this signal.
+
     ``active_weight`` exists only for compatibility with the current baseline
     sizing convention and is not intended to permanently couple alpha
-    generation with portfolio sizing.
+    generation with portfolio sizing. It must be strictly positive
+    (``0 < active_weight <= 1``): a zero value would collapse the ACTIVE
+    classification into FLAT and break the three-state contract.
     """
 
     def __init__(self, period: int, active_weight: Decimal = Decimal("0.95")):
         if type(period) is not int or period <= 0:
             raise SignalError("invalid_period", "period must be a positive integer")
         _require_decimal_weight(active_weight, symbol=None)
+        if active_weight == 0:
+            raise SignalError(
+                "invalid_active_weight",
+                "active_weight must be strictly positive; Decimal('0') would collapse "
+                "ACTIVE into FLAT",
+            )
         self._period = period
         self._active_weight = active_weight
 
@@ -245,19 +261,25 @@ class SmaSignal:
 
     def compute(self, as_of: date, data: SignalInput) -> Mapping[str, Decimal]:
         _check_as_of(as_of, data)
-        output: dict[str, Decimal] = {}
-        for symbol in data.symbols:
-            history = tuple(o for o in data.observations(symbol) if o.session <= as_of)
-            if len(history) < self._period:
-                continue  # OMIT / NO_DECISION
-            window = [o.indicator_close for o in reversed(history[-self._period :])]
-            sma = sum(window) / self._period
-            close = window[0]
-            if close > sma:
-                output[symbol] = self._active_weight
-            elif close < sma:
-                output[symbol] = Decimal("0")
-            # close == sma -> OMIT / NO_DECISION (preserve current target state)
+        if len(data.symbols) != 1:
+            raise SignalError(
+                "single_symbol_only",
+                "SmaSignal is a single-symbol compatibility signal; multi-symbol "
+                "inputs are not supported",
+            )
+        symbol = data.symbols[0]
+        history = tuple(o for o in data.observations(symbol) if o.session <= as_of)
+        if len(history) < self._period:
+            return validate_signal_output({}, data)  # OMIT / NO_DECISION
+        window = [o.indicator_close for o in reversed(history[-self._period :])]
+        sma = sum(window) / self._period
+        close = window[0]
+        if close > sma:
+            output = {symbol: self._active_weight}
+        elif close < sma:
+            output = {symbol: Decimal("0")}
+        else:
+            output = {}  # close == sma -> OMIT / NO_DECISION
         return validate_signal_output(output, data)
 
 
