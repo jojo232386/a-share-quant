@@ -41,15 +41,16 @@ reviewer 提出便默认接受。正式候选语义见 §3。
 | Finding | Codex 裁决 | 独立判断与采用方案 |
 |---|---|---|
 | P1-1 首期 `None` 歧义 | **ACCEPT** | `None` 无法区分首次、reset、丢失、路径错误或恢复失败。采用必传 `NoPreviousState(FIRST_PERIOD/EXPLICIT_RESET)`；任何隐式缺失 fail closed |
-| P1-2 previous 时序 | **MODIFY** | 时间单调校验成立，但不采用无必要的 strict `<`。候选使用 `previous.as_of <= as_of`；future previous 失败，v1 仍保持 daily contract |
+| P1-2 previous 时序 | **ACCEPT** | Planner v1 是 daily-only contract，date 没有 timestamp/sequence 可区分同日先后。采用严格 `previous.as_of < as_of`；同日或未来 previous 均 fail closed，同日 re-plan 留给新契约 |
 | P1-3 planned-state owner/schema | **ACCEPT** | pure planner 不应 I/O，但滚动状态必须有 owner 和独立 schema。采用 orchestration owner + `PLANNER_SCHEMA_VERSION`；拒绝复用 portfolio schema |
 | P1-4 Signal/sizing ownership | **MODIFY** | finding 成立，但明确拒绝 Opus 方案 (a)“正数仅是 ACTIVE marker、planner 覆盖权重”。采用方案 (b)：保留 A1 explicit Decimal target weights；长期 classification-only contract 版本化 deferred |
 | P1-5 universe drift | **ACCEPT** | 静默 carry-forward ineligible symbol 会产生不可解释状态。采用 caller-supplied eligible set + `universe_mismatch` fail closed；拒绝自动删除/清仓/置 0，也拒绝 planner 反向依赖 universe 模块 |
 | P1-6 Planner risk boundary | **MODIFY** | frozen route 确实要求风险检查，但仓库没有 `RiskState` 契约。采用必传、无状态、最小 `PlannerLimits`；拒绝发明状态型风险机，也拒绝完全没有 limits 输入 |
 | P1-7 planner validator ownership | **ACCEPT** | A1 validator 看不到 previous/universe/limits。采用 planner-owned 独立 validation；只对齐错误码风格，不共享实现、不修改 A1 |
 | P1-8 effective-state validation | **ACCEPT** | current output 单独合法不能证明 merge 后 gross 合法。采用对完整 effective state 重验；拒绝只验 current output |
+| P1-9 planned-state 真不可变性 | **ACCEPT** | `dataclass(frozen=True)` 只冻结属性赋值，不能阻止 caller-owned dict alias。采用构造时 validation + defensive copy + deterministic normalization + immutable representation/view |
 
-本轮高严重度裁决结果：`ACCEPT = 6`，`MODIFY = 3`，`REJECT = 0`（P0/P1 finding 级）；
+本轮高严重度裁决结果：`ACCEPT = 8`，`MODIFY = 2`，`REJECT = 0`（P0/P1 finding 级）；
 方案级明确拒绝包括 P0 候选 A/C、P1-4 方案 (a)、隐式 state recovery、自动 universe migration
 和自造 `RiskState`。`REJECT = 0` 不表示未拒绝任何方案，而是没有整项驳回一个 P0/P1 finding。
 
@@ -198,10 +199,36 @@ class PlannerLimits:
 `PlannedTargets` 与 `PreviousTargets` 字段形状相同但类型不同，防止把 current Signal output
 或 realized positions 当成已验证的 previous planned state。
 
+### 4.1 真不可变 value-object 契约
+
+`@dataclass(frozen=True)` 只禁止字段重新赋值，不足以冻结字段指向的 mutable mapping。
+`PreviousTargets` 与 `PlannedTargets` 的构造边界必须执行以下步骤：
+
+1. 对 caller 提供的 mapping 完成 planner-owned key/value/invariant validation；
+2. 将校验后的 `(symbol, Decimal weight)` 按 symbol 排序并复制到 planner-owned storage；
+3. 只保存不可变表示，例如 `tuple[tuple[str, Decimal], ...]`，或保存
+   `MappingProxyType(dict(caller_mapping))` 的**新 dict defensive copy**；
+4. public `targets` 只暴露只读 view/immutable mapping，不暴露任何内部 mutable dict；
+5. 禁止直接 `MappingProxyType(caller_mapping)`，因为 proxy 会继续观察 caller 后续修改；
+6. 禁止把 caller 的 mapping 原样存入 frozen dataclass；
+7. 不把 float/int/bool 自动转换成 Decimal。“normalize”只统一顺序/容器表示，不改变已验证的
+   symbol 或 Decimal 数值语义。
+
+因此，下列行为必须成立：
+
+- 构造 state 后修改、清空或删除原始 dict 的 key，不会改变 state；
+- 对原始 dict 中既有 symbol 重新赋值，不会改变 state；
+- 通过 `state.targets[...] = ...` 修改会失败；
+- 相同内容、不同 caller mapping 顺序会得到相等且确定性一致的 state；
+- `PreviousTargets`、`PlannedTargets` 和 serialization loader 重建的 state 遵守同一规则。
+
+允许的内部实现包括 sorted tuple、基于新 defensive copy 的 `MappingProxyType` 或语义等价的
+持久不可变 mapping；本设计不锁定具体容器，只锁定不可 alias、不可变和确定性。
+
 `PlannerLimits()` 的默认字段值保留当前 long-only / unlevered 行为；`limits` 在函数签名中仍是
 必传参数，调用方必须显式传入 `PlannerLimits()` 或更严格的已冻结配置，不能依赖隐藏默认值。
 
-### 4.1 Public function/API 候选签名
+### 4.2 Public function/API 候选签名
 
 Planner core 直接消费 A1 已产生的显式 output，不在 core 内重新运行 Signal：
 
@@ -272,15 +299,16 @@ def build_signal(
 冻结以下不变量：
 
 ```text
-previous.as_of <= current as_of
+previous.as_of < current as_of
 ```
 
-`previous.as_of > as_of` 以 `future_previous_state` fail closed。这里使用 `<=`，不使用 `<`，
-避免无必要地封死未来的同日链式规划/恢复能力。
+`previous.as_of >= as_of` 以 `non_ascending_previous_state` fail closed。equal-date 与 future
+previous 都非法；调用方不得用输入顺序、文件 mtime 或执行先后来弥补 date 缺少 sequence 的
+问题。
 
 Planner v1 正式仍是 **daily plan contract**：只接受严格 `date`，不接受 `datetime` 或
-`Timestamp`，也不实现日内多次 re-plan。同日相等仅是 contract-level forward compatibility，
-不表示 v1 已获得 intraday ordering、timestamp 或 replay sequencing 语义。
+`Timestamp`，也不实现日内多次 re-plan。同日 re-plan / T+0 必须通过未来带 intraday
+timestamp 与显式 sequence/order 的新版本契约实现，不能复用 Planner v1 的 date-only state。
 
 ---
 
@@ -362,6 +390,8 @@ limits 或 previous-state 规则塞回 A1。
 - hard gross ceiling = `1`，不允许 leverage；
 - 求和在固定高精度 local Decimal context 中完成；
 - current、previous 和 effective 都必须逐层校验，不能信任类型标注或上游对象名。
+- `PreviousTargets` 与 `PlannedTargets` 构造时必须 defensive copy/normalize，不能 alias
+  caller-owned mutable mapping；构造后的 public targets 必须只读且内容稳定。
 
 ### 8.2 可配置 risk limits
 
@@ -473,7 +503,7 @@ one-or-more eligible symbols。能力不通过调用 `compute()` 后捕获 `Sign
 |---|---|---|
 | `invalid_as_of` | runtime invariant | `as_of` 不是 exact `date` |
 | `invalid_previous_state` | runtime invariant | `previous` 缺省、为 `None` 或类型错误 |
-| `future_previous_state` | runtime invariant | `previous.as_of > as_of` |
+| `non_ascending_previous_state` | runtime invariant | `previous.as_of >= as_of`；同日与未来 previous 都非法 |
 | `invalid_eligible_symbols` | configuration | eligible set 类型、symbol 或空集合非法 |
 | `universe_mismatch` | runtime invariant | current/previous key 不属于 eligible symbols |
 | `invalid_output_type` | runtime invariant | Signal output 不是 Mapping |
@@ -546,7 +576,8 @@ owner 负责加载、校验、将 state 传给 planner、在成功规划后原�
 - `targets` 按 symbol 排序序列化；显式 0 key 必须保留；
 - 未知字段、缺字段、重复 key、非法 Decimal、非法 symbol、错误 schema 或 universe mismatch
   都 fail closed；
-- loader 必须重建并复验 `PreviousTargets`，不能把“能 parse JSON”当成 state 合法；
+- loader 必须通过 §4.1 的 defensive immutable constructor 重建并复验 `PreviousTargets`，
+  不能把“能 parse JSON”当成 state 合法，也不能保留 decoded mutable dict alias；
 - 丢失/损坏/恢复失败不等于 first period；
 - state 写入原子性、锁、备份、hash/manifest 与 storage backend 属于未来实现设计。
 
@@ -558,9 +589,11 @@ owner 负责加载、校验、将 state 传给 planner、在成功规划后原�
   `PlannedTargets`；
 - validation 和求和使用固定 local Decimal context，不受调用方 global context 影响；
 - merge 与 serialization 按 symbol 排序，不依赖 Mapping/set 迭代顺序；
+- state 构造时 defensive copy/normalize；caller 后续修改输入 mapping 不得改变 state、merge
+  结果或 serialized bytes；
 - 不使用 wall clock、随机数、网络或实际账本；
 - planner 的 `as_of` 是日级 `date`，不含日内 timestamp；
-- `previous.as_of <= as_of`，但 v1 不提供同日多次 re-plan 的业务保证；
+- `previous.as_of < as_of`；同日多次 re-plan 不属于 v1；
 - serialized bytes 的确定性由 §12 canonical rules 保证，不能用 Decimal 原始展示形式或插入
   顺序制造不同 state bytes。
 
@@ -583,6 +616,8 @@ owner 负责加载、校验、将 state 传给 planner、在成功规划后原�
 11. planned/feasible/realized 偏离的监控、告警和停止条件；
 12. stateful `RiskState`（若未来需要）的数据来源、时序与 ownership；
 13. execution/paper state 的独立 schema/version，不得借用 planner 或 portfolio schema。
+14. same-day multiple plans 的 timestamp、sequence/order、幂等和冲突处理；不得用 date-only
+    `PreviousTargets` 表达日内顺序。
 
 现有 `PositionLot.available_date` / `sellable_size` 是未来 T+0 capability 的良好扩展点，但不代表
 “T+0 只需改 available_date”。真正的 T+0 还需要 intraday timestamp、same-day multiple
@@ -600,7 +635,7 @@ instrument capability 的独立设计。Planner v1 保持 daily plan contract。
 - `previous` 省略与 `None` 均 fail closed；
 - `FIRST_PERIOD` 与 `EXPLICIT_RESET` 均需显式构造，且 serialization provenance 不同；
 - missing/corrupt state 不会退化成 first period；
-- future previous 失败，equal-date previous 被 contract 接受；
+- equal-date 与 future previous 都以 `non_ascending_previous_state` fail closed；
 - `datetime`/`Timestamp` 被拒绝。
 
 ### 15.2 Merge / key semantics
@@ -612,7 +647,19 @@ instrument capability 的独立设计。Planner v1 保持 daily plan contract。
 - first period + empty current output 返回合法空 planned state；
 - previous `0.6` + current 新 symbol `0.6` 在 effective validation 失败。
 
-### 15.3 Universe / validation / limits
+### 15.3 Immutable state ownership
+
+- 用 mutable dict 分别构造 `PreviousTargets` 与 `PlannedTargets`，随后修改、删除、清空原 dict，
+  state 的 keys/weights/equality/serialization 均不变；
+- 构造后对原 dict 的既有 symbol 重新赋值，state 不变；
+- 对 `state.targets` 做 item assignment/deletion 失败；
+- 两个插入顺序不同但内容相同的 mapping 产生相等、排序一致的 state；
+- implementation 若使用 `MappingProxyType`，测试必须证明 proxy 包装的是新 defensive copy，
+  不是 caller-owned dict；
+- loader 从 decoded mutable mapping 构造 state 后，修改 decoded mapping 不影响 state；
+- explicit zero key 在 defensive copy/normalize 后仍保留，Decimal 不被 coercion 或量化。
+
+### 15.4 Universe / validation / limits
 
 - current unknown symbol 和 previous universe drift 均以 `universe_mismatch` 失败；
 - previous 的 ineligible 显式 0 也不能静默删除；
@@ -622,7 +669,7 @@ instrument capability 的独立设计。Planner v1 保持 daily plan contract。
 - invalid limits 在 assembly/configuration 阶段失败；
 - 不同 global Decimal context 下结果相同。
 
-### 15.4 SignalSpec / compatibility
+### 15.5 SignalSpec / compatibility
 
 - `set(SIGNAL_SPECS) == set(SIGNAL_REGISTRY)`；
 - key == `spec.name`，builder 结果类型与 registry 一致；
@@ -631,7 +678,7 @@ instrument capability 的独立设计。Planner v1 保持 daily plan contract。
 - A1 `signals.py`、A1 existing tests、v0.2 portfolio/coordinator 和 Gate E audit assets 无 diff；
 - planner state 使用 `PLANNER_SCHEMA_VERSION`，v0.2 仍使用 `PORTFOLIO_SCHEMA_VERSION`。
 
-### 15.5 Serialization
+### 15.6 Serialization
 
 - explicit zero round-trip 后 key 仍存在；
 - Decimal 不经过 float；
@@ -666,13 +713,14 @@ instrument capability 的独立设计。Planner v1 保持 daily plan contract。
 |---|---|---|---|
 | P0-1 weight 被错误绑定 initial cash | **ACCEPT** | **CLOSED** | §A.1 比较三种分母后，§3 采用 plan 应用时 NAV 比例，并把 NAV/valuation/fen/rounding/rebalance 移交 future integration |
 | P1-1 首期 `None` 歧义 | **ACCEPT** | **CLOSED** | §4–5 使用必传 `NoPreviousState(FIRST_PERIOD/EXPLICIT_RESET)`，缺失/恢复失败不降级 |
-| P1-2 previous 时间关系 | **MODIFY** | **CLOSED** | §5.2 采用 `previous.as_of <= as_of` 而非 strict `<`，future previous fail closed |
+| P1-2 previous 时间关系 | **ACCEPT** | **CLOSED** | §5.2 采用严格 `previous.as_of < as_of`；equal/future previous fail closed，同日 re-plan deferred |
 | P1-3 planned-state owner/schema 缺失 | **ACCEPT** | **CLOSED** | §12 采用 orchestration owner、独立 `PLANNER_SCHEMA_VERSION` 与 envelope |
 | P1-4 Signal weight/sizing 被 planner 覆盖 | **MODIFY** | **CLOSED** | §9 拒绝 marker 方案 (a)，保留 A1 explicit target-weight 数值，不归一化 |
 | P1-5 universe drift 静默 carry-forward | **ACCEPT** | **CLOSED** | §7 对 previous/current 统一 `universe_mismatch` fail closed，不删、不清仓、不置 0 |
 | P1-6 风控边界不清 | **MODIFY** | **CLOSED** | §0.2/§8 采用最小 `PlannerLimits`，拒绝无仓库契约的 `RiskState` |
 | P1-7 planner 复用 A1 validator | **ACCEPT** | **CLOSED** | §8 采用 planner-owned validation，不调用 A1 validator |
 | P1-8 只校验 current output | **ACCEPT** | **CLOSED** | §6/§8 对 merge 后完整 effective state 重验 exposure/limits |
+| P1-9 shallow-frozen state 可被 caller dict 修改 | **ACCEPT** | **CLOSED** | §4.1/§15.3 要求 defensive copy、deterministic normalization、immutable view 与 alias regression tests |
 | P2-1 explicit zero / missing key 矛盾 | n/a | **CLOSED** | §6 使用 key-preserving state machine，0 与 omit 永不合并 |
 | P2-2 Signal construction/cardinality 双表或探测 | n/a | **CLOSED** | §10 单一 `SignalSpec` 真相源 + registry key-set contract + assembly check |
 | P2-3 `0.95` 数量事实错误 | n/a | **CLOSED** | §0.1/§9 改为多处 legacy/audit copies，明确不触碰冻结资产 |
@@ -682,7 +730,8 @@ instrument capability 的独立设计。Planner v1 保持 daily plan contract。
 ### 17.1 Self-review result
 
 - placeholder scan：未发现占位符或未决二选一；
-- internal consistency：weight、zero/omit、universe、previous、schema 与 error code 使用单一语义；
+- internal consistency：weight、zero/omit、universe、strict previous chronology、immutable state、
+  schema 与 error code 使用单一语义；
 - scope check：所有 execution/reconciliation/T+0 内容均为 deferred contract，不含实现；
 - compatibility check：A1、coordinator、portfolio schema 与 Gate E/replay 均在修改禁区；
 - open findings：P0 = 0，P1 = 0，P2 = 0，P3 = 0。
