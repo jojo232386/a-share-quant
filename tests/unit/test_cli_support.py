@@ -10,6 +10,8 @@ import pytest
 
 from aquant.backtest_cli import _parser as backtest_parser
 from aquant.backtest_cli import main as backtest_main
+from aquant.cli import _parser as data_parser
+from aquant.cli import main as data_main
 from aquant.cli_support import make_safe_argument_parser, path_beneath, write_json
 from aquant.experiment_cli import _parser as experiment_parser
 from aquant.experiment_cli import main as experiment_main
@@ -90,6 +92,7 @@ def test_write_json_preserves_sorted_utf8_compact_newline_output():
     ("parser", "expected_sha256"),
     (
         (backtest_parser, "ba8189f69ebfb92152b2830047a41e48ec0f4909fbad34070b8de67ffd2d8c27"),
+        (data_parser, "7fd566e6f70d0cce186a5e7794dfd0d470075ba2a1df64d3840dc3cb45f66677"),
         (report_parser, "82db437c5aae8774b99b173fad74e54d931c9e1fa4ad64abb7f90426939999f5"),
         (experiment_parser, "35cb7b3b7c5b5916b8336f01de73a740c65dce41cc49ac31ec119364acb2dfbd"),
         (portfolio_parser, "e0585dfe5aa1ca8a6eed6427cdf20978b004412028783a780da1f9da64d05824"),
@@ -104,6 +107,7 @@ def test_non_audit_cli_help_output_is_byte_compatible(parser, expected_sha256):
     ("command", "error_type"),
     (
         (backtest_main, "BacktestCliError"),
+        (data_main, "DataCliError"),
         (report_main, "ReportCliError"),
         (experiment_main, "ExperimentCliError"),
         (portfolio_main, "PortfolioCliError"),
