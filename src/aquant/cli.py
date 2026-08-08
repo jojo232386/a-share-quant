@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from aquant.cli_support import write_json
+from aquant.cli_support import make_safe_argument_parser, write_json
 from aquant.config import load_data_config
 from aquant.data.akshare_client import AkshareClient
 from aquant.data.calendar_snapshot import CalendarSnapshotStore
@@ -23,6 +23,20 @@ from aquant.data.corporate_action_ingestion import (
 from aquant.data.ingestion import RunResult, run_ingestion
 from aquant.data.manifest import ManifestWriter
 from aquant.data.snapshot import RawSnapshotStore
+
+
+class DataCliError(RuntimeError):
+    """Sanitized data command error."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
+
+
+_SAFE_ARGUMENT_PARSER = make_safe_argument_parser(
+    error_factory=DataCliError,
+    invalid_arguments_message="data command arguments are invalid",
+)
 
 
 @dataclass(frozen=True)
@@ -47,8 +61,12 @@ def _real_services() -> CliServices:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="aquant-data")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = _SAFE_ARGUMENT_PARSER(prog="aquant-data")
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+        parser_class=_SAFE_ARGUMENT_PARSER,
+    )
     fetch = subparsers.add_parser(
         "fetch",
         help="fetch the content-addressed v0.1 research universe",
@@ -105,8 +123,8 @@ def _corporate_action_summary(
 
 def main(argv: Sequence[str] | None = None, *, services: CliServices | None = None) -> int:
     """Run the CLI and return a process exit code without exposing exception text."""
-    args = _parser().parse_args(argv)
     try:
+        args = _parser().parse_args(argv)
         project_root = Path(args.project_root).resolve()
         config_path = Path(args.config)
         if not config_path.is_absolute():
