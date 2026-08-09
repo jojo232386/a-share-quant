@@ -455,3 +455,66 @@ git log --oneline 772c5d08141b25ebe8a32e24e09f5c4f3bd58e88..HEAD
 Bind review to the exact baseline/head range. Fix every P0/P1 and every important spec/quality issue, rerun
 affected tests, then rerun final gates. Stop locally after `PASS_READY_FOR_INDEPENDENT_REVIEW`; do not push,
 open a PR, merge, release, enter Gate F, or start paper/live trading.
+
+## A2 FORMAT GATE AMENDMENT
+
+- **Date:** 2026-08-09
+- **Status:** Frozen closeout erratum
+- **Frozen baseline:** `772c5d08141b25ebe8a32e24e09f5c4f3bd58e88` (`origin/main`)
+- **Pre-amendment implementation HEAD:** `b9b0bc981efa65bf7abcc7575649fe294a696a6c`
+
+This amendment preserves the original Task 3 Step 2 gate above as audit history and supersedes only its
+repository-wide format subcommand for A2 closeout. It does not silently rewrite the original rule.
+
+### Original gate and baseline conflict evidence
+
+The frozen gate required `uv run --no-sync ruff format --check .` and stated that every listed command must
+exit 0 before a PASS claim. A read-only check of the frozen baseline with `ruff 0.14.13`, performed before
+this amendment, returned exit 1 with `79 files would be reformatted, 46 files already formatted`. The sorted
+79-path evidence set has SHA-256
+`0468a462a6c968f838be2196984d1ddf5e244d85b3e1eb5355da02928e5e4a8e`.
+
+The A2 change contains exactly these five Python paths:
+
+- `src/aquant/rolling/__init__.py`
+- `src/aquant/rolling/accounting.py`
+- `src/aquant/rolling/orchestration.py`
+- `tests/unit/test_rolling_accounting.py`
+- `tests/unit/test_rolling_orchestration.py`
+
+Their intersection with the 79 baseline failures is empty. Nineteen baseline failures are under the frozen
+`src/aquant/gate_e/`, `src/aquant/planner/`, `src/aquant/portfolio/`, or `src/aquant/rules/` paths. Making the
+repository-wide command pass inside A2 would therefore modify protected files and violate the source
+allowlist and frozen-path zero-diff contract.
+
+### Revised A2-specific format acceptance
+
+For A2 closeout, the format and lint acceptance is:
+
+```bash
+uv run --no-sync ruff check .
+uv run --no-sync ruff format --check \
+  src/aquant/rolling/__init__.py \
+  src/aquant/rolling/accounting.py \
+  src/aquant/rolling/orchestration.py \
+  tests/unit/test_rolling_accounting.py \
+  tests/unit/test_rolling_orchestration.py
+```
+
+Both commands must exit 0. Every other Task 3 Step 2 gate remains unchanged and must still pass. A2 does
+not have to repair pre-existing repository-wide format debt, and no old Python file outside the five-path
+list may be modified to satisfy this amendment. The repository-wide format command remains a read-only
+debt probe, not an A2 acceptance command.
+
+### Deferred repository formatting debt
+
+The 79-file repository-wide formatting debt is recorded independently as `R-014` in
+`docs/engineering/risk_governance.md`. It is not an A2 blocker and must be handled only by a separately
+authorized repository-hygiene task with its own semantic-diff and regression evidence.
+
+### Non-effects
+
+This amendment corrects only the conflict between the A2 format acceptance gate and the frozen baseline.
+It does not change A2 execution semantics, the Planner contract, the rolling accounting contract,
+shared-cash semantics, the desired/realized/residual contract, the R-007 conclusion, Gate E, Gate F, or any
+alpha, data-validity, paper-trading, or live-readiness status.

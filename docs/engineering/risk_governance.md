@@ -70,6 +70,7 @@
 | R-011 | 固定审计对象（trust anchor / audit commit / audit tag）若被移动或重建，审计链不可恢复 | P0 | 持续（每次治理变更） | 立即 | 每次治理变更后重新核验 `HANDOFF.md` 中的哈希与标签指向 | Blocker (active on trigger)（一旦发生漂移即阻断） |
 | R-012 | 无券商连接、自动下单与持续监控；不得表述为已完成实盘验证 | P1 | Paper Trading / Live Readiness（未授权） | 实盘接入 | 明确授权 + 独立任务书 + 资金安全门禁 | Deferred（在获得授权前不进入范围） |
 | R-013 | GitHub Dependabot 告警未分诊（push 时由远端报告，本任务未调查） | 待定 | 依赖与供应链分诊（独立任务） | 待分诊后确定 | 分诊记录：受影响依赖、是否进入运行路径、升级或豁免决定及理由 | Deferred（仅登记为分诊候选；本任务不调查、不修复） |
+| R-014 | 冻结基线中 79 个 Python 文件未满足 Ruff format；把全仓 format 直接作为 A2 门禁会与保护范围冲突 | P2 | Repository hygiene / 独立格式规范化任务 | 未来正式启用 repository-wide format CI 或验收门禁之前；不阻断 A2 closeout | 单独授权的纯格式 diff；确认不改变运行语义；全仓 `ruff format --check .`、lint、测试与 build 全部通过；保护范围经过独立复核 | Deferred（不属于 A2 blocker；基线与交集证据见 A2 implementation plan 的 FORMAT GATE AMENDMENT） |
 
 ### 3.1 R-007 A2 closure evidence
 
