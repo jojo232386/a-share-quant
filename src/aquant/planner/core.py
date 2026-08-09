@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
-from decimal import Context, Decimal, localcontext
+from decimal import Clamped, Context, Decimal, Inexact, Rounded, Underflow, localcontext
 from enum import StrEnum
 from types import MappingProxyType
 
@@ -70,15 +70,26 @@ def _exact_nonnegative_sum(values: Iterable[Decimal]) -> Decimal:
 
     min_exponent = min(int(value.as_tuple().exponent) for value in operands)
     max_adjusted = max(value.adjusted() for value in operands)
+    min_adjusted = min(value.adjusted() for value in operands)
     precision = max(
         _CONTEXT.prec,
         max_adjusted - min_exponent + 1 + len(str(len(operands))),
     )
-    with localcontext(Context(prec=precision)):
-        total = _ZERO
-        for value in operands:
-            total += value
-        return total
+    context = Context(
+        prec=precision,
+        Emin=min(_CONTEXT.Emin, min_adjusted),
+        Emax=max(_CONTEXT.Emax, max_adjusted + len(str(len(operands)))),
+    )
+    for signal in (Inexact, Rounded, Underflow, Clamped):
+        context.traps[signal] = True
+    try:
+        with localcontext(context):
+            total = _ZERO
+            for value in operands:
+                total += value
+            return total
+    except (Clamped, Inexact, Rounded, Underflow, ValueError) as error:
+        raise PlannerError("planner_invariant_violation") from error
 
 
 def _gross(targets: Mapping[str, Decimal]) -> Decimal:
