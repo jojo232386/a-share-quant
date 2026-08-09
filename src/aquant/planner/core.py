@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from decimal import Context, Decimal, localcontext
 from enum import StrEnum
@@ -80,13 +80,11 @@ def _validate_hard_gross(targets: Mapping[str, Decimal]) -> None:
 class PreviousTargets:
     as_of: date
     targets: Mapping[str, Decimal]
-    _targets: dict[str, Decimal] = field(repr=False, compare=False)
 
     def __init__(self, *, as_of: date, targets: Mapping[str, Decimal]) -> None:
         object.__setattr__(self, "as_of", _validated_as_of(as_of))
         copied = _validated_targets(targets)
         _validate_hard_gross(copied)
-        object.__setattr__(self, "_targets", copied)
         object.__setattr__(self, "targets", MappingProxyType(copied))
 
 
@@ -94,13 +92,11 @@ class PreviousTargets:
 class PlannedTargets:
     as_of: date
     targets: Mapping[str, Decimal]
-    _targets: dict[str, Decimal] = field(repr=False, compare=False)
 
     def __init__(self, *, as_of: date, targets: Mapping[str, Decimal]) -> None:
         object.__setattr__(self, "as_of", _validated_as_of(as_of))
         copied = _validated_targets(targets)
         _validate_hard_gross(copied)
-        object.__setattr__(self, "_targets", copied)
         object.__setattr__(self, "targets", MappingProxyType(copied))
 
 

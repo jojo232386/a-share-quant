@@ -109,6 +109,18 @@ def test_target_states_defensively_copy_sort_and_are_read_only(state_type: type[
         del state.targets["000002"]  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize("state_type", [PreviousTargets, PlannedTargets])
+def test_target_states_do_not_expose_a_mutable_backing_dict(
+    state_type: type[object],
+) -> None:
+    state = state_type(  # type: ignore[call-arg]
+        as_of=AS_OF,
+        targets={"000001": Decimal("0.2")},
+    )
+    assert not hasattr(state, "_targets")
+    assert dict(state.targets) == {"000001": Decimal("0.2")}  # type: ignore[attr-defined]
+
+
 def test_target_states_equal_across_insertion_order_and_preserve_decimal_value() -> None:
     left = PreviousTargets(
         as_of=AS_OF,
@@ -156,6 +168,23 @@ def test_signal_output_must_be_mapping_and_is_independently_validated() -> None:
     assert_code(exc, "non_decimal_weight")
 
 
+@pytest.mark.parametrize(
+    ("signal_output", "code"),
+    [
+        ({"": Decimal("0")}, "invalid_symbol"),
+        ({"000001": Decimal("NaN")}, "non_finite_weight"),
+        ({"000001": Decimal("-0.1")}, "negative_weight"),
+        ({"000001": Decimal("1.1")}, "weight_above_one"),
+    ],
+)
+def test_signal_output_has_the_same_symbol_and_weight_validation(
+    signal_output: object, code: str
+) -> None:
+    with pytest.raises(PlannerError) as exc:
+        plan(signal_output)
+    assert_code(exc, code)
+
+
 def test_merge_overrides_preserves_zeros_and_carries_omitted_values() -> None:
     prior = previous({"000001": Decimal("0.4"), "000002": Decimal("0")})
     output = plan({"000001": Decimal("0.5"), "510300": Decimal("0")}, prior=prior)
@@ -164,6 +193,11 @@ def test_merge_overrides_preserves_zeros_and_carries_omitted_values() -> None:
         ("000002", Decimal("0")),
         ("510300", Decimal("0")),
     )
+
+
+def test_current_zero_overrides_prior_positive_and_retains_the_key() -> None:
+    output = plan({"000001": Decimal("0")}, prior=previous({"000001": Decimal("0.4")}))
+    assert tuple(output.targets.items()) == (("000001", Decimal("0")),)
 
 
 def test_multi_period_output_preserves_keys_and_does_not_invent_keys() -> None:
@@ -227,6 +261,31 @@ def test_default_limits_and_invalid_limit_fields() -> None:
     assert_code(exc, "invalid_limits")
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_single_weight": 1},
+        {"max_single_weight": Decimal("NaN")},
+        {"max_single_weight": Decimal("0")},
+        {"max_single_weight": Decimal("1.1")},
+        {"max_gross": 1},
+        {"max_gross": Decimal("Infinity")},
+        {"max_gross": Decimal("0")},
+        {"max_gross": Decimal("1.1")},
+        {"min_cash_ratio": 0},
+        {"min_cash_ratio": Decimal("NaN")},
+        {"min_cash_ratio": Decimal("-0.1")},
+        {"min_cash_ratio": Decimal("1")},
+    ],
+)
+def test_every_planner_limit_field_requires_finite_decimal_in_range(
+    kwargs: dict[str, object],
+) -> None:
+    with pytest.raises(PlannerError) as exc:
+        PlannerLimits(**kwargs)  # type: ignore[arg-type]
+    assert_code(exc, "invalid_limits")
+
+
 def test_configured_limit_violations_and_order() -> None:
     with pytest.raises(PlannerError) as exc:
         plan({"000001": Decimal("0.6")}, limits=PlannerLimits(max_single_weight=Decimal("0.5")))
@@ -262,3 +321,49 @@ def test_fixed_decimal_context_makes_results_independent_of_caller_context() -> 
         getcontext().prec = original_prec
     assert low_precision == high_precision
     assert low_precision.targets["000001"] == Decimal("0.12345678901234567890")
+
+
+@pytest.mark.parametrize(
+    ("limits", "expected_code"),
+    [
+        (
+            PlannerLimits(max_gross=Decimal("0.999999999999999999999999999998")),
+            "max_gross_exceeded",
+        ),
+        (
+            PlannerLimits(
+                max_gross=Decimal("0.999999999999999999999999999999"),
+                min_cash_ratio=Decimal("2E-30"),
+            ),
+            "min_cash_ratio_violated",
+        ),
+    ],
+)
+def test_fixed_decimal_context_controls_near_boundary_gross_validation(
+    limits: PlannerLimits, expected_code: str
+) -> None:
+    weights = {
+        "000001": Decimal("0.333333333333333333333333333333"),
+        "000002": Decimal("0.333333333333333333333333333333"),
+        "510300": Decimal("0.333333333333333333333333333333"),
+    }
+    original_prec = getcontext().prec
+    outcomes: list[tuple[str, str | PlannedTargets]] = []
+    try:
+        for precision in (6, 50):
+            getcontext().prec = precision
+            try:
+                outcomes.append(
+                    (
+                        "accepted",
+                        plan(
+                            weights,
+                            limits=limits,
+                        ),
+                    )
+                )
+            except PlannerError as error:
+                outcomes.append(("rejected", error.code))
+    finally:
+        getcontext().prec = original_prec
+    assert outcomes == [("rejected", expected_code), ("rejected", expected_code)]
