@@ -209,6 +209,29 @@ def test_mapping_value_error_does_not_leak_raw_config_payload() -> None:
     assert exc.value.__cause__ is None
 
 
+def test_mapping_runtime_error_does_not_leak_or_chain_raw_config_payload() -> None:
+    class RuntimeSecretConfig(Mapping[str, object]):
+        def __iter__(self):
+            return iter(("period",))
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: str) -> object:
+            raise RuntimeError("runtime secret payload")
+
+    with pytest.raises(PlannerError) as exc:
+        build_signal(
+            name="sma",
+            config=RuntimeSecretConfig(),
+            eligible_symbols=_ONE_SYMBOL,
+        )
+    assert_code(exc, "invalid_signal_config")
+    assert "runtime secret payload" not in str(exc.value)
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None
+
+
 def test_mapping_configuration_is_read_once_before_builder_validation() -> None:
     class ReadOnceConfig(Mapping[str, object]):
         reads = 0
@@ -231,6 +254,35 @@ def test_mapping_configuration_is_read_once_before_builder_validation() -> None:
 
     assert type(signal) is SmaSignal
     assert config.reads == 1
+
+
+def test_builder_runtime_error_is_not_treated_as_a_mapping_snapshot_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken_builder(_config: Mapping[str, object]) -> SmaSignal:
+        raise RuntimeError("builder runtime failure")
+
+    monkeypatch.setattr(
+        assembly,
+        "SIGNAL_SPECS",
+        MappingProxyType(
+            {
+                "sma": SignalSpec(
+                    name="sma",
+                    builder=broken_builder,
+                    cardinality=SignalCardinality.SINGLE_SYMBOL,
+                ),
+                "top_k_momentum": assembly.SIGNAL_SPECS["top_k_momentum"],
+            }
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="builder runtime failure"):
+        assembly.build_signal(
+            name="sma",
+            config={"period": 20},
+            eligible_symbols=_ONE_SYMBOL,
+        )
 
 
 @pytest.mark.parametrize(

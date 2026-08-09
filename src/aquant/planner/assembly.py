@@ -43,10 +43,13 @@ def _validated_config(
 ) -> dict[str, object]:
     if not isinstance(config, Mapping):
         _invalid_signal_config()
+    snapshot: dict[str, object] | None = None
     try:
         snapshot = dict(config)
-    except (KeyError, TypeError, ValueError):
-        raise PlannerError("invalid_signal_config") from None
+    except Exception:
+        pass
+    if snapshot is None:
+        raise PlannerError("invalid_signal_config")
     keys = set(snapshot)
     if not required.issubset(keys) or not keys.issubset(required | optional):
         _invalid_signal_config()
