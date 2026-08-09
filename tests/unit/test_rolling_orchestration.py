@@ -327,6 +327,31 @@ def test_total_target_notional_uses_same_equity_and_respects_max_gross(tmp_path)
     assert ledger == create_rolling_ledger(1_000_000)
 
 
+def test_total_target_notional_aggregates_across_symbols_for_max_gross(tmp_path):
+    calendar = _calendar(tmp_path, T, T1, date(2026, 7, 16))
+    ledger = create_rolling_ledger(1_000_000)
+    before = ledger
+
+    with pytest.raises(PortfolioError) as captured:
+        _run(
+            planned=PlannedTargets(
+                as_of=T,
+                targets={
+                    "600519": Decimal("0.3"),
+                    "601318": Decimal("0.3"),
+                },
+            ),
+            ledger=ledger,
+            execution_inputs=(_input("601318"), _input("600519")),
+            calendar=calendar,
+            limits=PlannerLimits(max_gross=Decimal("0.5")),
+        )
+
+    assert captured.value.code == "max_gross_exceeded"
+    assert ledger is before
+    assert ledger == before
+
+
 def test_calendar_end_without_next_session_fails_not_residuals(tmp_path):
     calendar = _calendar(tmp_path, T)
 
