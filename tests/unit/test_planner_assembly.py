@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import FrozenInstanceError
 from decimal import Decimal
 from types import MappingProxyType
 
 import pytest
 
+import aquant.planner as planner
 import aquant.planner.assembly as assembly
 from aquant.planner import (
     SIGNAL_SPECS,
@@ -24,6 +27,28 @@ _TWO_SYMBOLS = frozenset({"600519", "000001"})
 def assert_code(exc_info: pytest.ExceptionInfo[PlannerError], code: str) -> None:
     assert exc_info.value.code == code
     assert str(exc_info.value) == code
+
+
+def test_public_api_is_the_exact_frozen_assembly_and_core_surface() -> None:
+    assert set(planner.__all__) == {
+        "PLANNER_SCHEMA_VERSION",
+        "NoPreviousState",
+        "NoPreviousStateReason",
+        "PlannedTargets",
+        "PlannerError",
+        "PlannerLimits",
+        "PreviousTargets",
+        "SIGNAL_SPECS",
+        "SignalCardinality",
+        "SignalSpec",
+        "build_signal",
+        "plan_targets",
+    }
+
+
+def test_signal_spec_is_frozen() -> None:
+    with pytest.raises(FrozenInstanceError):
+        SIGNAL_SPECS["sma"].name = "changed"  # type: ignore[misc]
 
 
 def test_signal_specs_are_the_single_registry_aligned_truth_source() -> None:
@@ -163,6 +188,29 @@ def test_eligible_symbols_require_an_exact_nonempty_frozenset_of_strings(
     assert_code(exc, "invalid_eligible_symbols")
 
 
+def test_top_k_empty_eligible_symbols_are_invalid_before_cardinality() -> None:
+    with pytest.raises(PlannerError) as exc:
+        build_signal(
+            name="top_k_momentum",
+            config={"lookback": 20, "k": 3},
+            eligible_symbols=frozenset(),
+        )
+    assert_code(exc, "invalid_eligible_symbols")
+
+
+def test_frozenset_subclasses_are_rejected() -> None:
+    class EligibleSymbols(frozenset[str]):
+        pass
+
+    with pytest.raises(PlannerError) as exc:
+        build_signal(
+            name="sma",
+            config={"period": 20},
+            eligible_symbols=EligibleSymbols({"600519"}),
+        )
+    assert_code(exc, "invalid_eligible_symbols")
+
+
 def test_single_symbol_spec_rejects_multiple_eligible_symbols_before_construction() -> None:
     with pytest.raises(PlannerError) as exc:
         build_signal(
@@ -202,6 +250,58 @@ def test_registry_spec_parity_fails_closed_before_builder_selection(
             eligible_symbols=_ONE_SYMBOL,
         )
     assert_code(exc, "signal_spec_registry_mismatch")
+
+
+def test_name_mismatch_blocks_builder_before_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def spy_builder(_config: Mapping[str, object]) -> SmaSignal:
+        nonlocal calls
+        calls += 1
+        return SmaSignal(period=20)
+
+    monkeypatch.setattr(
+        assembly,
+        "SIGNAL_SPECS",
+        MappingProxyType(
+            {
+                "sma": SignalSpec(
+                    name="different_name",
+                    builder=spy_builder,
+                    cardinality=SignalCardinality.SINGLE_SYMBOL,
+                ),
+                "top_k_momentum": assembly.SIGNAL_SPECS["top_k_momentum"],
+            }
+        ),
+    )
+
+    with pytest.raises(PlannerError) as exc:
+        assembly.build_signal(
+            name="sma",
+            config={"period": 20},
+            eligible_symbols=_ONE_SYMBOL,
+        )
+    assert_code(exc, "signal_spec_registry_mismatch")
+    assert calls == 0
+
+
+def test_build_signal_does_not_probe_signal_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("signal capability must not be probed during assembly")
+
+    monkeypatch.setattr(SmaSignal, "compute", fail_if_called)
+    monkeypatch.setattr("aquant.research.signals.validate_signal_output", fail_if_called)
+
+    signal = build_signal(
+        name="sma",
+        config={"period": 20},
+        eligible_symbols=_ONE_SYMBOL,
+    )
+    assert type(signal) is SmaSignal
 
 
 def test_wrong_builder_runtime_type_is_a_planner_invariant_violation(
