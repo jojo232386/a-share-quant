@@ -186,7 +186,7 @@ class RebalanceAttempt:
     plan_as_of: date
     execution_session: date
     symbol: str
-    side: OrderSide | None
+    side: OrderSide
     target_weight: Decimal
     target_notional_fen: Decimal
     target_shares: int | None
@@ -241,8 +241,9 @@ def rebalance_to_plan(
 
 `RollingExecutionInput` 的两个价格必须同时为精确正 `Decimal`，或同时为 `None` 表示无 bar。
 `intent_session` 必须等于 plan T，`execution_session` 必须等于精确 T+1。无 bar 且正权重时
-`target_shares`/`residual_shares` 可为 `None`，`is_aligned=False`；显式 0 的 target shares 始终
-可确定为 0。attempt 的 `quantity_adjustment_reason` 只允许
+`target_shares`/`residual_shares` 可为 `None`，`is_aligned=False`，且方向尚不可 sizing 时不生成
+attempt；显式 0 的 target shares 始终可确定为 0。每个 attempt 都必须属于明确的 BUY 或 SELL
+phase。attempt 的 `quantity_adjustment_reason` 只允许
 `insufficient_cash_including_fees`、`partial_sellable_position` 或 `None`。FILLED 要求正
 `filled_size`、fees 非空、rejection 为空；REJECTED 要求 `filled_size=0`、fees 为空和明确
 rejection。无动作 symbol 不生成 attempt。

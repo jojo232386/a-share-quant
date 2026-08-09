@@ -124,7 +124,7 @@ class RebalanceAttempt:
     plan_as_of: date
     execution_session: date
     symbol: str
-    side: OrderSide | None
+    side: OrderSide
     target_weight: Decimal
     target_notional_fen: Decimal
     target_shares: int | None
@@ -430,8 +430,11 @@ git diff --exit-code 772c5d08141b25ebe8a32e24e09f5c4f3bd58e88 -- \
   src/aquant/planner src/aquant/research/signals.py src/aquant/portfolio \
   src/aquant/rules src/aquant/gate_e tests/contracts/import_contract.json \
   release configs uv.lock
-git diff --exit-code --diff-filter=MD \
+git diff --exit-code --diff-filter=MDRT \
   772c5d08141b25ebe8a32e24e09f5c4f3bd58e88 -- tests
+! git diff --name-only --diff-filter=A \
+  772c5d08141b25ebe8a32e24e09f5c4f3bd58e88 -- tests | \
+  rg -v '^(tests/unit/test_rolling_accounting.py|tests/unit/test_rolling_orchestration.py|tests/rolling_determinism_probe.py)$'
 git status --short
 git log --oneline 772c5d08141b25ebe8a32e24e09f5c4f3bd58e88..HEAD
 ```
