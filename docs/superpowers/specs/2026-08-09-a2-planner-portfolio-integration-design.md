@@ -1,8 +1,8 @@
 # A2 Planner → Shared-Cash Rolling Portfolio 集成设计冻结
 
-日期：2026-08-09  
-状态：正式重新冻结；上一轮不可达 T+1 residual 场景已由本设计替换  
-基线：`772c5d08141b25ebe8a32e24e09f5c4f3bd58e88`  
+日期：2026-08-09
+状态：正式重新冻结；上一轮不可达 T+1 residual 场景已由本设计替换
+基线：`772c5d08141b25ebe8a32e24e09f5c4f3bd58e88`
 实施分支：`feat/a2-planner-portfolio-integration`
 
 本设计只冻结 Planner v1 到共享现金 rolling portfolio 的最小集成。它不修改 Planner、A1、
