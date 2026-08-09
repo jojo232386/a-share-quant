@@ -36,6 +36,8 @@ alpha、盈利、稳健性、可交易性或实盘就绪。
 - 不引入 tolerance、rebalance band、优化器、预算重分配或 projected-risk 引擎；
 - 不扩展日内 timestamp、同日多计划、部分成交市场模拟或 broker/live；
 - 不为 rolling 结果增加历史 Gate E 兼容导出；
+- 不新增 persistent retry/residual target 对象；
+- 不新增 rolling artifact、identity hash、export 或 replay schema；
 - 不新增第二套公司行为引擎。
 
 ## 3. 已冻结的估值与时序
@@ -158,6 +160,77 @@ snapshots 被携带和验证，但 A2 不创建第二套公司行为编排。
 
 ### 6.2 Rolling orchestration
 
+公开 orchestration contract 精确冻结为：
+
+```python
+class RollingAttemptStatus(StrEnum):
+    FILLED = "filled"
+    REJECTED = "rejected"
+
+@dataclass(frozen=True)
+class RollingConfig:
+    limits: PlannerLimits
+
+@dataclass(frozen=True)
+class RollingExecutionInput:
+    symbol: str
+    instrument_kind: InstrumentKind
+    intent_session: date
+    execution_session: date
+    previous_close: Decimal | None
+    execution_open: Decimal | None
+
+@dataclass(frozen=True)
+class RebalanceAttempt:
+    attempt_id: str
+    plan_as_of: date
+    execution_session: date
+    symbol: str
+    side: OrderSide | None
+    target_weight: Decimal
+    target_notional_fen: Decimal
+    target_shares: int | None
+    realized_before: int
+    requested_size: int
+    feasible_size: int
+    filled_size: int
+    status: RollingAttemptStatus
+    rejection_reason: RejectionReason | None
+    fees: FeeBreakdown | None
+    cash_before_fen: int
+    cash_after_fen: int
+    quantity_adjustment_reason: str | None
+
+@dataclass(frozen=True)
+class TargetRealization:
+    symbol: str
+    desired_weight: Decimal
+    target_notional_fen: Decimal
+    target_shares: int | None
+    realized_shares: int
+    residual_shares: int | None
+    is_aligned: bool
+
+@dataclass(frozen=True)
+class RollingRebalanceResult:
+    planned: PlannedTargets
+    execution_session: date
+    equity_fen: int
+    attempts: tuple[RebalanceAttempt, ...]
+    targets: tuple[TargetRealization, ...]
+    ledger: RollingPortfolioLedger
+
+def rebalance_to_plan(
+    *,
+    config: RollingConfig,
+    planned: PlannedTargets,
+    ledger: RollingPortfolioLedger,
+    execution_inputs: tuple[RollingExecutionInput, ...],
+    calendar: VerifiedTradingCalendar,
+    fee_policy: VerifiedFeePolicy,
+) -> RollingRebalanceResult: ...
+```
+
 `RollingConfig` 只包含精确 `PlannerLimits`。初始现金属于 ledger；日历和费用策略是经验证的
 运行输入；计划日期属于 `PlannedTargets`，不得复用 `PortfolioConfig` 的单次运行字段。
 
@@ -166,9 +239,17 @@ snapshots 被携带和验证，但 A2 不创建第二套公司行为编排。
 - 有 bar：精确 `previous_close` 与 `execution_open`；
 - 无 bar：两者都为 `None`。
 
-公开入口 `rebalance_to_plan()` 返回不可变 attempts、per-symbol target realization、最终
-rolling ledger 和 residual evidence。它只接受精确 `PlannedTargets`，先校验快照/pristine、
-交易日和价格日期绑定，再做 reconciliation 和 sizing。
+`RollingExecutionInput` 的两个价格必须同时为精确正 `Decimal`，或同时为 `None` 表示无 bar。
+`intent_session` 必须等于 plan T，`execution_session` 必须等于精确 T+1。无 bar 且正权重时
+`target_shares`/`residual_shares` 可为 `None`，`is_aligned=False`；显式 0 的 target shares 始终
+可确定为 0。attempt 的 `quantity_adjustment_reason` 只允许
+`insufficient_cash_including_fees`、`partial_sellable_position` 或 `None`。FILLED 要求正
+`filled_size`、fees 非空、rejection 为空；REJECTED 要求 `filled_size=0`、fees 为空和明确
+rejection。无动作 symbol 不生成 attempt。
+
+公开入口只接受上述精确类型，返回不可变 attempts、per-symbol target realization、最终
+rolling ledger 和 residual evidence。它先校验快照/pristine、交易日和价格日期绑定，再做
+reconciliation 和 sizing。
 
 ## 7. 执行顺序与共享现金
 

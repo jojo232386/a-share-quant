@@ -12,7 +12,10 @@
 
 ## 1. Frozen baseline and boundary
 
-- Baseline and implementation HEAD: `772c5d08141b25ebe8a32e24e09f5c4f3bd58e88`
+- Frozen source baseline: `772c5d08141b25ebe8a32e24e09f5c4f3bd58e88`
+- Docs-review HEAD before review fixes: `a1d69f985a798218e378c30b465fcc8bbfeeb0cc`
+- Production implementation starts only after the final docs-only review-fix commit; Task 1 preflight must
+  record that actual HEAD and confirm its baseline-relative diff contains only these two A2 documents.
 - Branch: `feat/a2-planner-portfolio-integration`
 - Worktree: `/Users/ASUS/.local/share/a-share-quant/a2-planner-portfolio-integration`
 - Design: `docs/superpowers/specs/2026-08-09-a2-planner-portfolio-integration-design.md`
@@ -95,9 +98,80 @@ class RollingPortfolioLedger:
 Functions: `create_rolling_ledger`, `promote_portfolio_ledger`, `post_rolling_buy`,
 `post_rolling_sell`, `close_rolling_session`, and `verify_rolling_ledger`.
 
-`aquant.rolling.orchestration` provides exact immutable `RollingConfig`,
-`RollingExecutionInput`, `RebalanceAttempt`, `TargetRealization`,
-`RollingRebalanceResult`, and keyword-only `rebalance_to_plan()`.
+`aquant.rolling.orchestration` provides:
+
+```python
+class RollingAttemptStatus(StrEnum):
+    FILLED = "filled"
+    REJECTED = "rejected"
+
+@dataclass(frozen=True)
+class RollingConfig:
+    limits: PlannerLimits
+
+@dataclass(frozen=True)
+class RollingExecutionInput:
+    symbol: str
+    instrument_kind: InstrumentKind
+    intent_session: date
+    execution_session: date
+    previous_close: Decimal | None
+    execution_open: Decimal | None
+
+@dataclass(frozen=True)
+class RebalanceAttempt:
+    attempt_id: str
+    plan_as_of: date
+    execution_session: date
+    symbol: str
+    side: OrderSide | None
+    target_weight: Decimal
+    target_notional_fen: Decimal
+    target_shares: int | None
+    realized_before: int
+    requested_size: int
+    feasible_size: int
+    filled_size: int
+    status: RollingAttemptStatus
+    rejection_reason: RejectionReason | None
+    fees: FeeBreakdown | None
+    cash_before_fen: int
+    cash_after_fen: int
+    quantity_adjustment_reason: str | None
+
+@dataclass(frozen=True)
+class TargetRealization:
+    symbol: str
+    desired_weight: Decimal
+    target_notional_fen: Decimal
+    target_shares: int | None
+    realized_shares: int
+    residual_shares: int | None
+    is_aligned: bool
+
+@dataclass(frozen=True)
+class RollingRebalanceResult:
+    planned: PlannedTargets
+    execution_session: date
+    equity_fen: int
+    attempts: tuple[RebalanceAttempt, ...]
+    targets: tuple[TargetRealization, ...]
+    ledger: RollingPortfolioLedger
+
+def rebalance_to_plan(
+    *,
+    config: RollingConfig,
+    planned: PlannedTargets,
+    ledger: RollingPortfolioLedger,
+    execution_inputs: tuple[RollingExecutionInput, ...],
+    calendar: VerifiedTradingCalendar,
+    fee_policy: VerifiedFeePolicy,
+) -> RollingRebalanceResult: ...
+```
+
+Both execution prices are exact positive `Decimal` or both are `None` for no bar. Attempt invariants and the
+closed set of quantity-adjustment reasons are frozen in the design §6.2. No persistent retry object,
+artifact/hash/export/replay schema, or projected execution-time risk engine may be added.
 
 No rolling type is added to `aquant.portfolio.__all__` or the frozen import contract.
 
@@ -354,7 +428,10 @@ If any acceptance item is missing, leave the register open and do not create thi
 ```bash
 git diff --exit-code 772c5d08141b25ebe8a32e24e09f5c4f3bd58e88 -- \
   src/aquant/planner src/aquant/research/signals.py src/aquant/portfolio \
-  src/aquant/rules src/aquant/gate_e release configs uv.lock
+  src/aquant/rules src/aquant/gate_e tests/contracts/import_contract.json \
+  release configs uv.lock
+git diff --exit-code --diff-filter=MD \
+  772c5d08141b25ebe8a32e24e09f5c4f3bd58e88 -- tests
 git status --short
 git log --oneline 772c5d08141b25ebe8a32e24e09f5c4f3bd58e88..HEAD
 ```
