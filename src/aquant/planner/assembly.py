@@ -39,27 +39,32 @@ def _invalid_signal_config() -> NoReturn:
 
 
 def _validated_config(
-    config: Mapping[str, object], *, required: frozenset[str], optional: frozenset[str]
-) -> None:
+    config: object, *, required: frozenset[str], optional: frozenset[str]
+) -> dict[str, object]:
     if not isinstance(config, Mapping):
         _invalid_signal_config()
-    keys = set(config)
+    try:
+        snapshot = dict(config)
+    except (KeyError, TypeError, ValueError):
+        raise PlannerError("invalid_signal_config") from None
+    keys = set(snapshot)
     if not required.issubset(keys) or not keys.issubset(required | optional):
         _invalid_signal_config()
+    return snapshot
 
 
 def _build_sma_signal(config: Mapping[str, object]) -> Signal:
     """Build the A1 SMA signal from its explicit planner configuration."""
 
-    _validated_config(
+    snapshot = _validated_config(
         config,
         required=frozenset({"period"}),
         optional=frozenset({"active_weight"}),
     )
     try:
-        if "active_weight" in config:
-            return SmaSignal(period=config["period"], active_weight=config["active_weight"])
-        return SmaSignal(period=config["period"])
+        if "active_weight" in snapshot:
+            return SmaSignal(period=snapshot["period"], active_weight=snapshot["active_weight"])
+        return SmaSignal(period=snapshot["period"])
     except (KeyError, SignalError, TypeError) as error:
         raise PlannerError("invalid_signal_config") from error
 
@@ -67,13 +72,13 @@ def _build_sma_signal(config: Mapping[str, object]) -> Signal:
 def _build_top_k_momentum_signal(config: Mapping[str, object]) -> Signal:
     """Build the A1 top-k momentum signal from its explicit configuration."""
 
-    _validated_config(
+    snapshot = _validated_config(
         config,
         required=frozenset({"lookback", "k"}),
         optional=frozenset(),
     )
     try:
-        return TopKMomentumSignal(lookback=config["lookback"], k=config["k"])
+        return TopKMomentumSignal(lookback=snapshot["lookback"], k=snapshot["k"])
     except (KeyError, SignalError, TypeError) as error:
         raise PlannerError("invalid_signal_config") from error
 

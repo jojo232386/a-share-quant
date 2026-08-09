@@ -167,6 +167,72 @@ def test_top_k_invalid_config_fails_closed_without_raw_config(config: object) ->
     assert repr(config) not in str(exc.value)
 
 
+def test_unhashable_mapping_key_is_an_invalid_signal_config() -> None:
+    class UnhashableKeyConfig(Mapping[object, object]):
+        def __iter__(self):
+            return iter(([],))
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: object) -> object:
+            return 20
+
+    with pytest.raises(PlannerError) as exc:
+        build_signal(
+            name="sma",
+            config=UnhashableKeyConfig(),  # type: ignore[arg-type]
+            eligible_symbols=_ONE_SYMBOL,
+        )
+    assert_code(exc, "invalid_signal_config")
+
+
+def test_mapping_value_error_does_not_leak_raw_config_payload() -> None:
+    class SecretConfig(Mapping[str, object]):
+        def __iter__(self):
+            return iter(("period",))
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: str) -> object:
+            raise ValueError("raw secret config payload")
+
+    with pytest.raises(PlannerError) as exc:
+        build_signal(
+            name="sma",
+            config=SecretConfig(),
+            eligible_symbols=_ONE_SYMBOL,
+        )
+    assert_code(exc, "invalid_signal_config")
+    assert "raw secret config payload" not in str(exc.value)
+    assert exc.value.__cause__ is None
+
+
+def test_mapping_configuration_is_read_once_before_builder_validation() -> None:
+    class ReadOnceConfig(Mapping[str, object]):
+        reads = 0
+
+        def __iter__(self):
+            return iter(("period",))
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: str) -> object:
+            self.reads += 1
+            if self.reads > 1:
+                raise AssertionError("configuration mapping was re-read after snapshot")
+            assert key == "period"
+            return 20
+
+    config = ReadOnceConfig()
+    signal = build_signal(name="sma", config=config, eligible_symbols=_ONE_SYMBOL)
+
+    assert type(signal) is SmaSignal
+    assert config.reads == 1
+
+
 @pytest.mark.parametrize(
     "eligible_symbols",
     [
