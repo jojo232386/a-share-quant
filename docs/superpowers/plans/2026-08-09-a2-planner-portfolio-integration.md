@@ -431,6 +431,11 @@ git diff --exit-code 772c5d08141b25ebe8a32e24e09f5c4f3bd58e88 -- \
   src/aquant/rules src/aquant/gate_e tests/contracts/import_contract.json \
   release configs uv.lock
 git diff --exit-code --diff-filter=MDRT \
+  772c5d08141b25ebe8a32e24e09f5c4f3bd58e88 -- src/aquant
+! git diff --name-only --diff-filter=A \
+  772c5d08141b25ebe8a32e24e09f5c4f3bd58e88 -- src/aquant | \
+  rg -v '^(src/aquant/rolling/__init__.py|src/aquant/rolling/accounting.py|src/aquant/rolling/orchestration.py)$'
+git diff --exit-code --diff-filter=MDRT \
   772c5d08141b25ebe8a32e24e09f5c4f3bd58e88 -- tests
 ! git diff --name-only --diff-filter=A \
   772c5d08141b25ebe8a32e24e09f5c4f3bd58e88 -- tests | \
