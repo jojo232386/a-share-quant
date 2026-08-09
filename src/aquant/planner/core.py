@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Context, Decimal, localcontext
@@ -63,12 +63,26 @@ def _validated_targets(value: object) -> dict[str, Decimal]:
     return dict(sorted(validated.items()))
 
 
-def _gross(targets: Mapping[str, Decimal]) -> Decimal:
-    with localcontext(_CONTEXT):
+def _exact_nonnegative_sum(values: Iterable[Decimal]) -> Decimal:
+    operands = tuple(value for value in values if value != _ZERO)
+    if not operands:
+        return _ZERO
+
+    min_exponent = min(int(value.as_tuple().exponent) for value in operands)
+    max_adjusted = max(value.adjusted() for value in operands)
+    precision = max(
+        _CONTEXT.prec,
+        max_adjusted - min_exponent + 1 + len(str(len(operands))),
+    )
+    with localcontext(Context(prec=precision)):
         total = _ZERO
-        for weight in targets.values():
-            total += weight
+        for value in operands:
+            total += value
         return total
+
+
+def _gross(targets: Mapping[str, Decimal]) -> Decimal:
+    return _exact_nonnegative_sum(targets.values())
 
 
 def _validate_hard_gross(targets: Mapping[str, Decimal]) -> None:
@@ -170,9 +184,8 @@ def _validate_effective_state(
         raise PlannerError("max_single_weight_exceeded")
     if gross > limits.max_gross:
         raise PlannerError("max_gross_exceeded")
-    with localcontext(_CONTEXT):
-        if gross > _ONE - limits.min_cash_ratio:
-            raise PlannerError("min_cash_ratio_violated")
+    if _exact_nonnegative_sum((gross, limits.min_cash_ratio)) > _ONE:
+        raise PlannerError("min_cash_ratio_violated")
 
 
 def plan_targets(

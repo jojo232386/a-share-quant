@@ -367,3 +367,34 @@ def test_fixed_decimal_context_controls_near_boundary_gross_validation(
     finally:
         getcontext().prec = original_prec
     assert outcomes == [("rejected", expected_code), ("rejected", expected_code)]
+
+
+@pytest.mark.parametrize(
+    ("signal_output", "limits", "expected_code"),
+    [
+        (
+            {"000001": Decimal("1"), "000002": Decimal("1E-60")},
+            PlannerLimits(),
+            "hard_gross_ceiling_exceeded",
+        ),
+        (
+            {"000001": Decimal("1")},
+            PlannerLimits(min_cash_ratio=Decimal("1E-61")),
+            "min_cash_ratio_violated",
+        ),
+    ],
+)
+def test_tiny_decimal_excesses_are_rejected_independently_of_caller_context(
+    signal_output: dict[str, Decimal], limits: PlannerLimits, expected_code: str
+) -> None:
+    original_prec = getcontext().prec
+    outcomes: list[str] = []
+    try:
+        for precision in (6, 80):
+            getcontext().prec = precision
+            with pytest.raises(PlannerError) as exc:
+                plan(signal_output, limits=limits)
+            outcomes.append(exc.value.code)
+    finally:
+        getcontext().prec = original_prec
+    assert outcomes == [expected_code, expected_code]
