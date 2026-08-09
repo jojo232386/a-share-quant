@@ -85,6 +85,11 @@ verifier 通过都不足以证明 pristine。
 - 每次调用都从本期 effective plan 与本期实际账本重新计算 delta。
 - 失败或部分执行后，result 明确保留 desired、realized 与 residual；账本未成交部分不消失。
 
+当 `target_shares` 可确定时，`residual_shares` 精确定义为
+`abs(target_shares - realized_shares)`，因此清仓失败也报告正的未收敛股数；仅当无 bar 且正权重
+导致 target 无法 sizing 时为 `None`。`is_aligned` 当且仅当 `residual_shares == 0`。订单方向仍由
+有符号的 `delta_shares = target_shares - realized_shares` 决定，不能由 residual 的正值反推。
+
 下一期由新的 effective `PlannedTargets`、新的 T 收盘快照和新的 T+1 执行输入重新计算，不能
 沿用旧 target notional 或用 realized state 改写 Planner state。
 

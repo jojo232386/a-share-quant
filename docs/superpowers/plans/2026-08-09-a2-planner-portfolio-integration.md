@@ -440,7 +440,13 @@ git diff --exit-code --diff-filter=MDRT \
 ! git diff --name-only --diff-filter=A \
   772c5d08141b25ebe8a32e24e09f5c4f3bd58e88 -- tests | \
   rg -v '^(tests/unit/test_rolling_accounting.py|tests/unit/test_rolling_orchestration.py|tests/rolling_determinism_probe.py)$'
-git status --short
+unexpected_paths="$(
+  git -c diff.renames=false diff --name-only \
+    772c5d08141b25ebe8a32e24e09f5c4f3bd58e88..HEAD | \
+  rg -v '^(docs/superpowers/specs/2026-08-09-a2-planner-portfolio-integration-design.md|docs/superpowers/plans/2026-08-09-a2-planner-portfolio-integration.md|docs/engineering/risk_governance.md|src/aquant/rolling/__init__.py|src/aquant/rolling/accounting.py|src/aquant/rolling/orchestration.py|tests/unit/test_rolling_accounting.py|tests/unit/test_rolling_orchestration.py|tests/rolling_determinism_probe.py)$' || true
+)"
+test -z "$unexpected_paths"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
 git log --oneline 772c5d08141b25ebe8a32e24e09f5c4f3bd58e88..HEAD
 ```
 
