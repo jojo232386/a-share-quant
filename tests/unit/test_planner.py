@@ -415,3 +415,22 @@ def test_exact_sum_handles_exponents_beyond_the_default_context_range() -> None:
     finally:
         getcontext().prec = original_prec
     assert outcomes == ["max_gross_exceeded", "max_gross_exceeded"]
+
+
+def test_unrepresentable_exact_sum_context_is_an_internal_planner_error() -> None:
+    original_prec = getcontext().prec
+    outcomes: list[str] = []
+    try:
+        for precision in (6, 80):
+            getcontext().prec = precision
+            with pytest.raises(PlannerError) as exc:
+                plan(
+                    {"000001": Decimal("1E-1000000000000000000")},
+                    limits=PlannerLimits(
+                        max_gross=Decimal("1E-1000000000000000001")
+                    ),
+                )
+            outcomes.append(exc.value.code)
+    finally:
+        getcontext().prec = original_prec
+    assert outcomes == ["planner_invariant_violation", "planner_invariant_violation"]

@@ -75,14 +75,14 @@ def _exact_nonnegative_sum(values: Iterable[Decimal]) -> Decimal:
         _CONTEXT.prec,
         max_adjusted - min_exponent + 1 + len(str(len(operands))),
     )
-    context = Context(
-        prec=precision,
-        Emin=min(_CONTEXT.Emin, min_adjusted),
-        Emax=max(_CONTEXT.Emax, max_adjusted + len(str(len(operands)))),
-    )
-    for signal in (Inexact, Rounded, Underflow, Clamped):
-        context.traps[signal] = True
     try:
+        context = Context(
+            prec=precision,
+            Emin=min(_CONTEXT.Emin, min_adjusted),
+            Emax=max(_CONTEXT.Emax, max_adjusted + len(str(len(operands)))),
+        )
+        for signal in (Inexact, Rounded, Underflow, Clamped):
+            context.traps[signal] = True
         with localcontext(context):
             total = _ZERO
             for value in operands:
