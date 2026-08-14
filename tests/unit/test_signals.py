@@ -725,8 +725,6 @@ def test_explicit_registry_maps_names_to_constructors():
     assert set(SIGNAL_REGISTRY) == {
         "sma",
         "top_k_momentum",
-        "volatility_regime_defense",
     }
     assert SIGNAL_REGISTRY["sma"] is SmaSignal
     assert SIGNAL_REGISTRY["top_k_momentum"] is TopKMomentumSignal
-    assert SIGNAL_REGISTRY["volatility_regime_defense"] is VolatilityRegimeDefenseSignal

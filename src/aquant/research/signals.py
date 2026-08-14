@@ -451,5 +451,4 @@ class TopKMomentumSignal:
 SIGNAL_REGISTRY: Mapping[str, type[Signal]] = {
     "sma": SmaSignal,
     "top_k_momentum": TopKMomentumSignal,
-    "volatility_regime_defense": VolatilityRegimeDefenseSignal,
 }

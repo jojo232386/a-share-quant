@@ -28,6 +28,17 @@ Verified Market Snapshot
 
 `project-root` 提供标的域配置和输出位置；`data-root` 可指向独立的真实数据快照根目录。所有输入均以精确 ID 选择，不使用“最新文件”隐式规则。
 
+正式运行通过 `scripts/formal_research_runtime.sh run --` 启动。该脚本从干净 Git
+树构建并校验 wheel，在工作区外按 `uv.lock` 安装依赖，再非 editable 安装该 wheel，
+最后调用 wheel 提供的官方 `aquant-experiment` 入口。开发环境仍可使用 editable 安装，
+但不得作为 formal research runtime。
+
+2026-08-14 的启动故障已确认到直接机制：当时工作区 `.venv` 内的安装文件带有
+macOS `UF_HIDDEN` 文件标志，CPython 3.11.15 的 `site.py` 因该标志跳过 `.pth`。
+下划线开头的文件名不是跳过条件；在工作区外新建的同版本 uv editable 环境没有该标志
+并可正常导入。现有证据不能确认是谁在原环境创建后追加了该标志，因此 formal runtime
+不修改或依赖 `.pth`，而是使用隔离的非 editable wheel 安装。
+
 正式运行还必须通过 `--preregistration` 指向仓库内的 JSON 研究预注册文件。该文件必须在运行前已提交，且工作树必须干净；程序会自动绑定完整 Git HEAD、该文件最后修改的 commit 和内容 SHA-256。预注册必须绑定与策略匹配的指标、判断门槛、参数和真实输入身份。原 SMA 路径保留原有预注册口径；A4-1 另行冻结年化收益、Sharpe、最大回撤和毛换手率门槛。
 
 - `hypothesis`；
@@ -40,7 +51,7 @@ Verified Market Snapshot
 任一内容不匹配、未提交或运行前被修改，都会在产生正式 result artifact 前失败。A4-1 还会核对行情、公司行动、交易日历和 universe 的四个精确 ID。
 
 ```bash
-uv run --no-sync aquant-experiment research-loop \
+./scripts/formal_research_runtime.sh run -- research-loop \
   --project-root . \
   --data-root /path/to/a-share-quant-data \
   --universe-id <sha256> \
@@ -57,7 +68,7 @@ uv run --no-sync aquant-experiment research-loop \
 A4-1 只增加一个 Signal 实现；Planner、Portfolio、成交、费用和 artifact 路径保持不变。其正式参数固定为 20 个简单 close-to-close 收益、样本标准差 `ddof=1`、252 年化、25% 阈值和 95% ACTIVE 权重。20 个收益需要 21 个有效 `indicator_close`；不足时为 NO_DECISION，波动率等于阈值时为 ACTIVE，高于阈值时为 FLAT。
 
 ```bash
-uv run --no-sync aquant-experiment research-loop \
+./scripts/formal_research_runtime.sh run -- research-loop \
   --project-root . \
   --data-root /path/to/a-share-quant-data \
   --universe-id bba6760fa738a829bb09a72f0c90919aeba02429018b8fd189c65e2d6c82a20e \
@@ -72,6 +83,12 @@ uv run --no-sync aquant-experiment research-loop \
   --volatility-threshold 0.25 \
   --initial-cash-yuan 1000000.00 \
   --active-weight 0.95
+```
+
+只验证正式 wheel、非 editable 安装和官方 CLI 启动，不进入数据、策略或指标阶段：
+
+```bash
+./tests/scripts/test_formal_research_runtime.sh
 ```
 
 ## 输出
