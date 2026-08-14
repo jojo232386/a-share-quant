@@ -28,7 +28,7 @@ Verified Market Snapshot
 
 `project-root` 提供标的域配置和输出位置；`data-root` 可指向独立的真实数据快照根目录。所有输入均以精确 ID 选择，不使用“最新文件”隐式规则。
 
-正式运行还必须通过 `--preregistration` 指向仓库内的 JSON 研究预注册文件。该文件必须在运行前已提交，且工作树必须干净；程序会自动绑定完整 Git HEAD、该文件最后修改的 commit 和内容 SHA-256。预注册最小内容为：
+正式运行还必须通过 `--preregistration` 指向仓库内的 JSON 研究预注册文件。该文件必须在运行前已提交，且工作树必须干净；程序会自动绑定完整 Git HEAD、该文件最后修改的 commit 和内容 SHA-256。预注册必须绑定与策略匹配的指标、判断门槛、参数和真实输入身份。原 SMA 路径保留原有预注册口径；A4-1 另行冻结年化收益、Sharpe、最大回撤和毛换手率门槛。
 
 - `hypothesis`；
 - 与当次单标的运行一致的 `universe` 和 `evaluation_period`；
@@ -37,7 +37,7 @@ Verified Market Snapshot
 - 与现有 assessment 规则一致的 `pass_criteria` 和 `reject_criteria`；
 - 与当次 CLI 实际配置一致的 `strategy_parameters`。
 
-任一内容不匹配、未提交或运行前被修改，都会在产生正式 result artifact 前失败。
+任一内容不匹配、未提交或运行前被修改，都会在产生正式 result artifact 前失败。A4-1 还会核对行情、公司行动、交易日历和 universe 的四个精确 ID。
 
 ```bash
 uv run --no-sync aquant-experiment research-loop \
@@ -50,6 +50,26 @@ uv run --no-sync aquant-experiment research-loop \
   --preregistration configs/research/<hypothesis>.json \
   --symbol 510300 \
   --sma-period 20 \
+  --initial-cash-yuan 1000000.00 \
+  --active-weight 0.95
+```
+
+A4-1 只增加一个 Signal 实现；Planner、Portfolio、成交、费用和 artifact 路径保持不变。其正式参数固定为 20 个简单 close-to-close 收益、样本标准差 `ddof=1`、252 年化、25% 阈值和 95% ACTIVE 权重。20 个收益需要 21 个有效 `indicator_close`；不足时为 NO_DECISION，波动率等于阈值时为 ACTIVE，高于阈值时为 FLAT。
+
+```bash
+uv run --no-sync aquant-experiment research-loop \
+  --project-root . \
+  --data-root /path/to/a-share-quant-data \
+  --universe-id bba6760fa738a829bb09a72f0c90919aeba02429018b8fd189c65e2d6c82a20e \
+  --calendar-id fb24e5167d11fee3a58869f8de7910a0ea979d55d3481698bc5baf18cd508983 \
+  --snapshot-id 904e594e09d5baad4e70c626129b88bef1a596b755a0731ca234d240b02a8071 \
+  --corporate-action-snapshot-id b16ca276bf8d76637c47a1ae68c85a498f87fb17985262bb529338420903e370 \
+  --preregistration configs/research/a4_1_510300_volatility_regime_defense.json \
+  --symbol 510300 \
+  --strategy volatility_regime_defense \
+  --lookback-returns 20 \
+  --annualization 252 \
+  --volatility-threshold 0.25 \
   --initial-cash-yuan 1000000.00 \
   --active-weight 0.95
 ```

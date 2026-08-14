@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pandas as pd
+import pytest
 
 from aquant.backtest import load_verified_snapshot
 from aquant.data.calendar_snapshot import CalendarSnapshotStore, load_verified_calendar
@@ -19,7 +21,20 @@ from aquant.data.manifest import ManifestRecord, ManifestWriter
 from aquant.data.snapshot import RawSnapshotStore
 from aquant.experiment_cli import main
 from aquant.planner import PlannerLimits
-from aquant.research.loop import ResearchLoopConfig, run_research_loop
+from aquant.research.loop import (
+    A4_INSUFFICIENT_EVIDENCE_CRITERIA,
+    A4_INVALID_HANDLING,
+    A4_PASS_CRITERIA,
+    A4_PRIMARY_METRICS,
+    A4_RESEARCH_SEMANTICS,
+    A4_SECONDARY_METRICS,
+    A4_VALIDITY_CRITERIA,
+    STRATEGY_VOLATILITY_REGIME_DEFENSE,
+    ResearchLoopConfig,
+    ResearchLoopError,
+    research_config_payload,
+    run_research_loop,
+)
 from aquant.research.report import build_research_report, publish_research_report
 from aquant.rules import InstrumentKind, default_fee_policy
 from aquant.universe import (
@@ -45,6 +60,23 @@ def _config():
         symbol=SYMBOL,
         initial_cash_fen=10_000_000,
         sma_period=2,
+        active_weight=Decimal("0.95"),
+        limits=PlannerLimits(
+            max_single_weight=Decimal("0.95"),
+            max_gross=Decimal("0.95"),
+            min_cash_ratio=Decimal("0.05"),
+        ),
+    )
+
+
+def _a4_config() -> ResearchLoopConfig:
+    return ResearchLoopConfig(
+        symbol=SYMBOL,
+        initial_cash_fen=10_000_000,
+        strategy=STRATEGY_VOLATILITY_REGIME_DEFENSE,
+        lookback_returns=20,
+        annualization=252,
+        volatility_threshold=Decimal("0.25"),
         active_weight=Decimal("0.95"),
         limits=PlannerLimits(
             max_single_weight=Decimal("0.95"),
@@ -85,10 +117,41 @@ def _preregistration_content() -> bytes:
     return (json.dumps(values, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
-def _commit_preregistration(root) -> tuple[str, str]:
+def _a4_preregistration_content(records) -> bytes:
+    config = _a4_config()
+    values = {
+        "benchmark": "buy_and_hold",
+        "evaluation_period": {
+            "start": MARKET_SESSIONS[0].isoformat(),
+            "end": MARKET_SESSIONS[-1].isoformat(),
+        },
+        "hypothesis": "High volatility defense may improve risk-adjusted performance.",
+        "hypothesis_id": "A4_1_510300_VOLATILITY_REGIME_DEFENSE",
+        "input_identities": {
+            "calendar_id": records[2].calendar_id,
+            "corporate_action_snapshot_id": records[1].snapshot_id,
+            "market_snapshot_id": records[0].snapshot_id,
+            "universe_id": records[6].universe_id,
+        },
+        "insufficient_evidence_criteria": list(A4_INSUFFICIENT_EVIDENCE_CRITERIA),
+        "invalid_handling": A4_INVALID_HANDLING,
+        "pass_criteria": A4_PASS_CRITERIA,
+        "primary_metrics": list(A4_PRIMARY_METRICS),
+        "reject_criteria": "any_core_threshold_failure",
+        "research_semantics": A4_RESEARCH_SEMANTICS,
+        "secondary_metrics": list(A4_SECONDARY_METRICS),
+        "strategy_parameters": research_config_payload(config),
+        "subject": SYMBOL,
+        "universe": [SYMBOL],
+        "validity_criteria": A4_VALIDITY_CRITERIA,
+    }
+    return (json.dumps(values, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def _commit_preregistration(root, content: bytes | None = None) -> tuple[str, str]:
     preregistration = root / "configs" / "research" / "hypothesis.json"
     preregistration.parent.mkdir(parents=True)
-    preregistration.write_bytes(_preregistration_content())
+    preregistration.write_bytes(_preregistration_content() if content is None else content)
     (root / ".gitignore").write_text("/configs/universes/\n/data/\n/outputs/\n")
     subprocess.run(("git", "init", "-q"), cwd=root, check=True)
     subprocess.run(("git", "config", "user.name", "Research Test"), cwd=root, check=True)
@@ -297,6 +360,76 @@ def test_unchanged_target_retries_after_price_limit_rejection(tmp_path):
     assert result.strategy.fills[0].execution_date == SESSIONS[3]
 
 
+def test_a4_volatility_strategy_reuses_loop_and_produces_deterministic_artifacts(tmp_path):
+    records = _fixture(tmp_path)
+    content = _a4_preregistration_content(records)
+    arguments = {
+        "git_head": GIT_HEAD,
+        "preregistration_commit": PREREGISTRATION_COMMIT,
+        "preregistration_content": content,
+        "config": _a4_config(),
+        "market_data": records[3],
+        "corporate_actions": records[4],
+        "calendar": records[5],
+        "fee_policy": default_fee_policy(),
+        "universe": records[6],
+    }
+
+    first = run_research_loop(**arguments)
+    second = run_research_loop(**arguments)
+    first_report = build_research_report(first)
+    second_report = build_research_report(second)
+
+    assert first == second
+    assert first_report == second_report
+    assert first.strategy.label == "volatility_regime_defense_planner"
+    assert all(not decision.output for decision in first.strategy.decisions)
+    assert first_report.assessment == "REJECT"
+    run = json.loads(first_report.payload["run.json"])
+    assert run["config"] == research_config_payload(_a4_config())
+    assert run["preregistration_identity"] == {
+        "commit": PREREGISTRATION_COMMIT,
+        "content_sha256": hashlib.sha256(content).hexdigest(),
+    }
+    metrics = json.loads(first_report.payload["metrics.json"])
+    assert metrics["assessment"] == "REJECT"
+    assert metrics["preregistered_thresholds"]["sharpe_pass"] is False
+
+
+def test_a4_preregistration_rejects_wrong_frozen_input_identity(tmp_path):
+    records = _fixture(tmp_path)
+    values = json.loads(_a4_preregistration_content(records))
+    values["input_identities"]["market_snapshot_id"] = "0" * 64
+    content = (json.dumps(values, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+    with pytest.raises(ResearchLoopError) as exc:
+        run_research_loop(
+            git_head=GIT_HEAD,
+            preregistration_commit=PREREGISTRATION_COMMIT,
+            preregistration_content=content,
+            config=_a4_config(),
+            market_data=records[3],
+            corporate_actions=records[4],
+            calendar=records[5],
+            fee_policy=default_fee_policy(),
+            universe=records[6],
+        )
+    assert exc.value.code == "preregistration_mismatch"
+
+
+def test_a4_strategy_parameters_are_frozen_against_rescue():
+    config = _a4_config()
+    for changes in (
+        {"lookback_returns": 10},
+        {"annualization": 250},
+        {"volatility_threshold": Decimal("0.30")},
+        {"active_weight": Decimal("0.90")},
+    ):
+        with pytest.raises(ResearchLoopError) as exc:
+            replace(config, **changes)
+        assert exc.value.code == "invalid_config"
+
+
 def test_research_loop_cli_selects_exact_verified_inputs(tmp_path, capsys):
     records = _fixture(tmp_path)
     preregistration, actual_head = _commit_preregistration(tmp_path)
@@ -339,6 +472,47 @@ def test_research_loop_cli_selects_exact_verified_inputs(tmp_path, capsys):
         "commit": actual_head,
         "content_sha256": hashlib.sha256(_preregistration_content()).hexdigest(),
     }
+
+
+def test_a4_cli_binds_frozen_strategy_parameters_and_inputs(tmp_path, capsys):
+    records = _fixture(tmp_path)
+    content = _a4_preregistration_content(records)
+    preregistration, actual_head = _commit_preregistration(tmp_path, content)
+
+    exit_code = main(
+        [
+            "research-loop",
+            "--project-root",
+            str(tmp_path),
+            "--data-root",
+            str(tmp_path),
+            "--universe-id",
+            records[6].universe_id,
+            "--calendar-id",
+            records[2].calendar_id,
+            "--snapshot-id",
+            records[0].snapshot_id,
+            "--corporate-action-snapshot-id",
+            records[1].snapshot_id,
+            "--preregistration",
+            preregistration,
+            "--symbol",
+            SYMBOL,
+            "--strategy",
+            STRATEGY_VOLATILITY_REGIME_DEFENSE,
+            "--initial-cash-yuan",
+            "100000.00",
+        ]
+    )
+
+    response = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert response["assessment"] == "REJECT"
+    directory = tmp_path / response["research_directory"]
+    run = json.loads((directory / "run.json").read_text())
+    assert run["git_head"] == actual_head
+    assert run["config"] == research_config_payload(_a4_config())
+    assert run["input_identity"]["market_snapshot_id"] == records[0].snapshot_id
 
 
 def test_formal_research_rejects_modified_preregistration_before_artifact(tmp_path, capsys):

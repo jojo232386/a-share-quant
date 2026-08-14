@@ -21,7 +21,12 @@ from aquant.data.corporate_actions import (
 )
 from aquant.data.manifest import ManifestWriter
 from aquant.planner import PlannerLimits
-from aquant.research.loop import ResearchLoopConfig, run_research_loop
+from aquant.research.loop import (
+    STRATEGY_SMA,
+    STRATEGY_VOLATILITY_REGIME_DEFENSE,
+    ResearchLoopConfig,
+    run_research_loop,
+)
 from aquant.research.report import build_research_report, publish_research_report
 from aquant.research.week5 import (
     Week5Error,
@@ -81,7 +86,15 @@ def _parser() -> argparse.ArgumentParser:
     research.add_argument("--preregistration", required=True)
     research.add_argument("--symbol", required=True)
     research.add_argument("--initial-cash-yuan", default="1000000.00")
+    research.add_argument(
+        "--strategy",
+        choices=(STRATEGY_SMA, STRATEGY_VOLATILITY_REGIME_DEFENSE),
+        default=STRATEGY_SMA,
+    )
     research.add_argument("--sma-period", type=int, default=20)
+    research.add_argument("--lookback-returns", type=int, default=20)
+    research.add_argument("--annualization", type=int, default=252)
+    research.add_argument("--volatility-threshold", default="0.25")
     research.add_argument("--active-weight", default="0.95")
     research.add_argument("--output", default="outputs/research_loop")
     return parser
@@ -283,15 +296,20 @@ def _run_research_loop_command(args) -> dict[str, object]:
         )
     try:
         active_weight = Decimal(args.active_weight)
+        volatility_threshold = Decimal(args.volatility_threshold)
     except (InvalidOperation, ValueError) as exc:
         raise ExperimentCliError(
             "invalid_arguments",
-            "active weight must be an exact decimal",
+            "active weight and volatility threshold must be exact decimals",
         ) from exc
     config = ResearchLoopConfig(
         symbol=args.symbol,
         initial_cash_fen=_parse_cash_fen(args.initial_cash_yuan),
+        strategy=args.strategy,
         sma_period=args.sma_period,
+        lookback_returns=args.lookback_returns,
+        annualization=args.annualization,
+        volatility_threshold=volatility_threshold,
         active_weight=active_weight,
         limits=PlannerLimits(
             max_single_weight=active_weight,

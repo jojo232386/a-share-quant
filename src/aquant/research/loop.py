@@ -38,7 +38,12 @@ from aquant.portfolio import (
     actual_cash_date,
     decimal_yuan_to_fen,
 )
-from aquant.research.signals import SignalInput, SignalObservation, SmaSignal
+from aquant.research.signals import (
+    SignalInput,
+    SignalObservation,
+    SmaSignal,
+    VolatilityRegimeDefenseSignal,
+)
 from aquant.risk.metrics import RiskMetrics, compute_risk_metrics
 from aquant.rolling import (
     RebalanceAttempt,
@@ -59,7 +64,9 @@ from aquant.rules import (
 )
 from aquant.universe import VerifiedUniverse, verify_universe
 
-RESEARCH_LOOP_SCHEMA_VERSION = "1.1.0"
+RESEARCH_LOOP_SCHEMA_VERSION = "1.2.0"
+STRATEGY_SMA = "sma"
+STRATEGY_VOLATILITY_REGIME_DEFENSE = "volatility_regime_defense"
 PREREGISTRATION_PRIMARY_METRICS = (
     "total_return",
     "sharpe_zero_rate",
@@ -69,6 +76,56 @@ PREREGISTRATION_PASS_CRITERIA = {
     "strategy_total_return": "> benchmark_total_return",
     "strategy_sharpe_zero_rate": "> benchmark_sharpe_zero_rate",
     "strategy_max_drawdown": "<= benchmark_max_drawdown",
+}
+A4_PRIMARY_METRICS = (
+    "annualized_return",
+    "sharpe_zero_rate",
+    "max_drawdown",
+    "gross_turnover",
+)
+A4_SECONDARY_METRICS = ("total_return", "trade_count")
+A4_PASS_CRITERIA = {
+    "strategy_annualized_return": ">= 0.70 * benchmark_annualized_return",
+    "strategy_gross_turnover": "<= 100.0",
+    "strategy_max_drawdown": "<= 0.80 * benchmark_max_drawdown",
+    "strategy_sharpe_zero_rate": ">= benchmark_sharpe_zero_rate + 0.10",
+}
+A4_INVALID_HANDLING = {
+    "non_finite_input": "SignalInput fails closed before producing a decision",
+    "non_finite_return_or_volatility": "NO_DECISION",
+    "non_positive_close": "NO_DECISION",
+}
+A4_RESEARCH_SEMANTICS = {
+    "annualized_volatility": (
+        "sample_standard_deviation(latest_20_simple_returns, ddof=1) * sqrt(252)"
+    ),
+    "flat": "explicit Decimal('0') target passed through the existing Planner",
+    "no_decision": "symbol omitted so the existing Planner preserves the previous target",
+    "numeric_convention": (
+        "float arithmetic with math.fsum for mean and squared deviations, "
+        "matching aquant.risk.metrics"
+    ),
+    "price_series": "causal indicator_close available as of the session close",
+    "return_definition": "indicator_close[t] / indicator_close[t-1] - 1.0",
+    "threshold_boundary": (
+        "annualized_volatility <= 0.25 is ACTIVE; annualized_volatility > 0.25 is FLAT"
+    ),
+    "window_semantics": (
+        "latest 20 consecutive close-to-close returns ending at as_of, "
+        "requiring 21 valid closes"
+    ),
+    "warm_up": "fewer than 20 returns produces NO_DECISION",
+}
+A4_INSUFFICIENT_EVIDENCE_CRITERIA = (
+    "incomplete_data",
+    "provenance_failure",
+    "formal_runner_failure",
+    "strategy_cannot_be_expressed_by_existing_execution_semantics",
+)
+A4_VALIDITY_CRITERIA = {
+    "execution_consistency": "required",
+    "invalid_data_behavior": "none",
+    "provenance": "required",
 }
 _IMPLEMENTATION_FILES = (
     "experiment_cli.py",
@@ -97,7 +154,11 @@ class ResearchLoopConfig:
 
     symbol: str
     initial_cash_fen: int
+    strategy: str = STRATEGY_SMA
     sma_period: int = 20
+    lookback_returns: int = 20
+    annualization: int = 252
+    volatility_threshold: Decimal = Decimal("0.25")
     active_weight: Decimal = Decimal("0.95")
     limits: PlannerLimits = PlannerLimits(
         max_single_weight=Decimal("0.95"),
@@ -113,8 +174,26 @@ class ResearchLoopConfig:
             or type(self.initial_cash_fen) is not int
             or isinstance(self.initial_cash_fen, bool)
             or self.initial_cash_fen <= 0
-            or type(self.sma_period) is not int
-            or self.sma_period < 2
+            or self.strategy not in {STRATEGY_SMA, STRATEGY_VOLATILITY_REGIME_DEFENSE}
+            or (self.strategy == STRATEGY_SMA and (
+                type(self.sma_period) is not int or self.sma_period < 2
+            ))
+            or (self.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE and (
+                self.symbol != "510300"
+                or type(self.lookback_returns) is not int
+                or self.lookback_returns != 20
+                or type(self.annualization) is not int
+                or self.annualization != 252
+                or type(self.volatility_threshold) is not Decimal
+                or self.volatility_threshold != Decimal("0.25")
+                or self.active_weight != Decimal("0.95")
+                or self.limits
+                != PlannerLimits(
+                    max_single_weight=Decimal("0.95"),
+                    max_gross=Decimal("0.95"),
+                    min_cash_ratio=Decimal("0.05"),
+                )
+            ))
             or type(self.active_weight) is not Decimal
             or not self.active_weight.is_finite()
             or not Decimal("0") < self.active_weight <= Decimal("1")
@@ -127,6 +206,25 @@ class ResearchLoopConfig:
                 "invalid_config",
                 "research loop configuration is invalid",
             )
+
+
+def research_config_payload(config: ResearchLoopConfig) -> dict[str, object]:
+    """Return the exact strategy/parameter identity bound into formal artifacts."""
+    common: dict[str, object] = {
+        "symbol": config.symbol,
+        "initial_cash_fen": config.initial_cash_fen,
+        "active_weight": str(config.active_weight),
+        "limits": {key: str(value) for key, value in asdict(config.limits).items()},
+    }
+    if config.strategy == STRATEGY_SMA:
+        return {**common, "sma_period": config.sma_period}
+    return {
+        **common,
+        "strategy": STRATEGY_VOLATILITY_REGIME_DEFENSE,
+        "lookback_returns": config.lookback_returns,
+        "annualization": config.annualization,
+        "volatility_threshold": str(config.volatility_threshold),
+    }
 
 
 @dataclass(frozen=True)
@@ -665,7 +763,16 @@ def _simulate_path(
 
 
 def _strategy_plan_factory(config: ResearchLoopConfig) -> PlanFactory:
-    signal = SmaSignal(config.sma_period, config.active_weight)
+    signal = (
+        SmaSignal(config.sma_period, config.active_weight)
+        if config.strategy == STRATEGY_SMA
+        else VolatilityRegimeDefenseSignal(
+            lookback_returns=config.lookback_returns,
+            annualization=config.annualization,
+            volatility_threshold=config.volatility_threshold,
+            active_weight=config.active_weight,
+        )
+    )
 
     def factory(
         session: date,
@@ -809,13 +916,7 @@ def _identity_payload(
         "simulation_start": simulation_start.isoformat(),
         "simulation_end": simulation_end.isoformat(),
         "settlement_buffer_session": settlement_buffer_session.isoformat(),
-        "config": {
-            "symbol": config.symbol,
-            "initial_cash_fen": config.initial_cash_fen,
-            "sma_period": config.sma_period,
-            "active_weight": str(config.active_weight),
-            "limits": {key: str(value) for key, value in asdict(config.limits).items()},
-        },
+        "config": research_config_payload(config),
     }
 
 
@@ -825,6 +926,10 @@ def _validate_preregistration(
     config: ResearchLoopConfig,
     simulation_start: date,
     simulation_end: date,
+    market_data: VerifiedMarketData,
+    corporate_actions: VerifiedCorporateActions,
+    calendar: VerifiedTradingCalendar,
+    universe: VerifiedUniverse,
 ) -> str:
     try:
         preregistration = json.loads(content)
@@ -833,29 +938,52 @@ def _validate_preregistration(
             "invalid_preregistration",
             "preregistration must be valid UTF-8 JSON",
         ) from exc
-    expected_parameters = {
-        "symbol": config.symbol,
-        "initial_cash_fen": config.initial_cash_fen,
-        "sma_period": config.sma_period,
-        "active_weight": str(config.active_weight),
-        "limits": {key: str(value) for key, value in asdict(config.limits).items()},
-    }
+    expected_parameters = research_config_payload(config)
     expected_period = {
         "start": simulation_start.isoformat(),
         "end": simulation_end.isoformat(),
     }
-    if (
+    common_mismatch = (
         type(preregistration) is not dict
         or type(preregistration.get("hypothesis")) is not str
         or not preregistration["hypothesis"].strip()
         or preregistration.get("universe") != [config.symbol]
         or preregistration.get("evaluation_period") != expected_period
-        or preregistration.get("primary_metrics") != list(PREREGISTRATION_PRIMARY_METRICS)
         or preregistration.get("benchmark") != "buy_and_hold"
-        or preregistration.get("pass_criteria") != PREREGISTRATION_PASS_CRITERIA
-        or preregistration.get("reject_criteria") != "otherwise"
         or preregistration.get("strategy_parameters") != expected_parameters
-    ):
+    )
+    if config.strategy == STRATEGY_SMA:
+        strategy_mismatch = (
+            preregistration.get("primary_metrics")
+            != list(PREREGISTRATION_PRIMARY_METRICS)
+            or preregistration.get("pass_criteria") != PREREGISTRATION_PASS_CRITERIA
+            or preregistration.get("reject_criteria") != "otherwise"
+        )
+    else:
+        action = corporate_actions.provenance
+        assert action is not None
+        expected_inputs = {
+            "calendar_id": calendar.calendar_id,
+            "corporate_action_snapshot_id": action.snapshot_id,
+            "market_snapshot_id": market_data.provenance.snapshot_id,
+            "universe_id": universe.universe_id,
+        }
+        strategy_mismatch = (
+            preregistration.get("hypothesis_id")
+            != "A4_1_510300_VOLATILITY_REGIME_DEFENSE"
+            or preregistration.get("subject") != config.symbol
+            or preregistration.get("input_identities") != expected_inputs
+            or preregistration.get("primary_metrics") != list(A4_PRIMARY_METRICS)
+            or preregistration.get("secondary_metrics") != list(A4_SECONDARY_METRICS)
+            or preregistration.get("pass_criteria") != A4_PASS_CRITERIA
+            or preregistration.get("reject_criteria") != "any_core_threshold_failure"
+            or preregistration.get("invalid_handling") != A4_INVALID_HANDLING
+            or preregistration.get("research_semantics") != A4_RESEARCH_SEMANTICS
+            or preregistration.get("insufficient_evidence_criteria")
+            != list(A4_INSUFFICIENT_EVIDENCE_CRITERIA)
+            or preregistration.get("validity_criteria") != A4_VALIDITY_CRITERIA
+        )
+    if common_mismatch or strategy_mismatch:
         raise ResearchLoopError(
             "preregistration_mismatch",
             "preregistration must match the formal research definition and parameters",
@@ -875,7 +1003,7 @@ def run_research_loop(
     fee_policy: VerifiedFeePolicy,
     universe: VerifiedUniverse,
 ) -> ResearchLoopResult:
-    """Run one deterministic verified SMA path and one buy-and-hold benchmark."""
+    """Run one deterministic verified strategy and one buy-and-hold benchmark."""
     if (
         type(git_head) is not str
         or len(git_head) != 40
@@ -904,9 +1032,13 @@ def run_research_loop(
         config=config,
         simulation_start=sessions[0],
         simulation_end=sessions[-1],
+        market_data=market_data,
+        corporate_actions=corporate_actions,
+        calendar=calendar,
+        universe=universe,
     )
     strategy = _simulate_path(
-        label="sma_planner",
+        label=f"{config.strategy}_planner",
         config=config,
         sessions=sessions,
         bars=bars,

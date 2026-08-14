@@ -14,9 +14,14 @@ import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from aquant.research.loop import ResearchLoopResult, ResearchPathResult
+from aquant.research.loop import (
+    STRATEGY_VOLATILITY_REGIME_DEFENSE,
+    ResearchLoopResult,
+    ResearchPathResult,
+    research_config_payload,
+)
 
-REPORT_SCHEMA_VERSION = "1.1.0"
+REPORT_SCHEMA_VERSION = "1.2.0"
 
 
 class ResearchReportError(RuntimeError):
@@ -39,15 +44,56 @@ def _metrics(path: ResearchPathResult) -> dict[str, object]:
         **asdict(path.metrics),
         "initial_assets_yuan": path.ledger.initial_cash_fen / 100.0,
         "final_assets_yuan": path.ledger.daily_snapshots[-1].equity_fen / 100.0,
+        "trade_count": path.transaction_count,
         "transaction_count": path.transaction_count,
         "rejected_attempt_count": sum(item.status.value == "rejected" for item in path.attempts),
         "missing_market_session_count": len(path.missing_market_sessions),
     }
 
 
+def _a4_thresholds(result: ResearchLoopResult) -> dict[str, float | bool | None]:
+    strategy = result.strategy.metrics
+    benchmark = result.benchmark.metrics
+    return_threshold = 0.70 * benchmark.annualized_return
+    sharpe_threshold = (
+        benchmark.sharpe_zero_rate + 0.10
+        if benchmark.sharpe_zero_rate is not None
+        else None
+    )
+    drawdown_threshold = 0.80 * benchmark.max_drawdown
+    return {
+        "annualized_return_threshold": return_threshold,
+        "annualized_return_pass": strategy.annualized_return >= return_threshold,
+        "sharpe_threshold": sharpe_threshold,
+        "sharpe_pass": (
+            strategy.sharpe_zero_rate is not None
+            and sharpe_threshold is not None
+            and strategy.sharpe_zero_rate >= sharpe_threshold
+        ),
+        "max_drawdown_threshold": drawdown_threshold,
+        "max_drawdown_pass": strategy.max_drawdown <= drawdown_threshold,
+        "gross_turnover_threshold": 100.0,
+        "gross_turnover_pass": strategy.gross_turnover <= 100.0,
+    }
+
+
 def _assessment(result: ResearchLoopResult) -> str:
     strategy = result.strategy.metrics
     benchmark = result.benchmark.metrics
+    if result.config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE:
+        if result.strategy.missing_market_sessions or result.benchmark.missing_market_sessions:
+            return "INSUFFICIENT_EVIDENCE"
+        checks = _a4_thresholds(result)
+        passed = all(
+            checks[name] is True
+            for name in (
+                "annualized_return_pass",
+                "sharpe_pass",
+                "max_drawdown_pass",
+                "gross_turnover_pass",
+            )
+        )
+        return "ADVANCE_TO_ROBUSTNESS" if passed else "REJECT"
     sharpe_better = (
         strategy.sharpe_zero_rate is not None
         and benchmark.sharpe_zero_rate is not None
@@ -60,6 +106,41 @@ def _assessment(result: ResearchLoopResult) -> str:
     ):
         return "continue_validation"
     return "insufficient_preliminary_evidence"
+
+
+def _assessment_rule(result: ResearchLoopResult) -> str:
+    if result.config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE:
+        return (
+            "annualized return >= 70% of benchmark; zero-rate Sharpe >= benchmark + 0.10; "
+            "max drawdown <= 80% of benchmark; gross turnover <= 100.0"
+        )
+    return (
+        "strategy total return and zero-rate Sharpe must exceed benchmark, "
+        "and strategy max drawdown must not exceed benchmark"
+    )
+
+
+def _decision_reason(result: ResearchLoopResult, assessment: str) -> str:
+    if result.config.strategy != STRATEGY_VOLATILITY_REGIME_DEFENSE:
+        return assessment
+    if assessment == "INSUFFICIENT_EVIDENCE":
+        return "missing official market sessions prevent a complete comparison"
+    checks = _a4_thresholds(result)
+    failed = [
+        label
+        for label, key in (
+            ("annualized_return", "annualized_return_pass"),
+            ("sharpe_zero_rate", "sharpe_pass"),
+            ("max_drawdown", "max_drawdown_pass"),
+            ("gross_turnover", "gross_turnover_pass"),
+        )
+        if checks[key] is not True
+    ]
+    return (
+        "all preregistered core thresholds passed"
+        if not failed
+        else "failed preregistered core thresholds: " + ", ".join(failed)
+    )
 
 
 def _run_json(result: ResearchLoopResult, assessment: str) -> bytes:
@@ -85,22 +166,14 @@ def _run_json(result: ResearchLoopResult, assessment: str) -> bytes:
             "fee_policy_digest": result.fee_policy_digest,
             "price_stream_version": result.price_stream_version,
         },
-        "config": {
-            "symbol": result.config.symbol,
-            "initial_cash_fen": result.config.initial_cash_fen,
-            "sma_period": result.config.sma_period,
-            "active_weight": str(result.config.active_weight),
-            "limits": {key: str(value) for key, value in asdict(result.config.limits).items()},
-        },
+        "config": research_config_payload(result.config),
         "instrument_kind": result.instrument_kind.value,
         "simulation_start": result.simulation_start.isoformat(),
         "simulation_end": result.simulation_end.isoformat(),
         "settlement_buffer_session": result.settlement_buffer_session.isoformat(),
         "assessment": assessment,
-        "assessment_rule": (
-            "strategy total return and zero-rate Sharpe must exceed benchmark, "
-            "and strategy max drawdown must not exceed benchmark"
-        ),
+        "assessment_rule": _assessment_rule(result),
+        "decision_reason": _decision_reason(result, assessment),
         "execution_policy": {
             "signal": "verified indicator close after session close",
             "planner": "frozen A2 effective target state",
@@ -158,6 +231,9 @@ def _metrics_json(result: ResearchLoopResult, assessment: str) -> bytes:
         },
         "strategy": strategy,
     }
+    if result.config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE:
+        values["decision_reason"] = _decision_reason(result, assessment)
+        values["preregistered_thresholds"] = _a4_thresholds(result)
     return (
         json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode("utf-8")
@@ -348,18 +424,40 @@ def _ratio(value: float | None) -> str:
 def _markdown(result: ResearchLoopResult, assessment: str) -> str:
     strategy = result.strategy.metrics
     benchmark = result.benchmark.metrics
-    verdict = (
-        "达到继续验证门槛：值得进入样本外与参数敏感性检验。"
-        if assessment == "continue_validation"
-        else "未达到继续验证门槛：当前真实样本不足以支持进一步投入。"
-    )
+    if result.config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE:
+        verdict = {
+            "ADVANCE_TO_ROBUSTNESS": "达到全部预注册门槛；下一阶段才允许开展稳健性检验。",
+            "REJECT": "至少一项预注册核心门槛失败；本 hypothesis 淘汰，不调参救援。",
+            "INSUFFICIENT_EVIDENCE": "数据或执行证据不完整，无法形成研究结论。",
+        }[assessment]
+        strategy_description = (
+            f"20 日实现波动率（阈值 {result.config.volatility_threshold}，"
+            f"年化 {result.config.annualization}）→ 冻结 Planner → 滚动组合"
+        )
+        threshold_description = (
+            "门槛预先固定为：年化收益不低于 benchmark 的 70%，Sharpe 至少高 0.10，"
+            "最大回撤不高于 benchmark 的 80%，毛换手率不超过 10,000%。"
+        )
+        title = "# A4-1 510300 Volatility Regime Defense 研究报告"
+    else:
+        verdict = (
+            "达到继续验证门槛：值得进入样本外与参数敏感性检验。"
+            if assessment == "continue_validation"
+            else "未达到继续验证门槛：当前真实样本不足以支持进一步投入。"
+        )
+        strategy_description = f"SMA({result.config.sma_period}) → 冻结 Planner → 滚动组合"
+        threshold_description = (
+            "门槛预先固定为：策略总收益与 Sharpe 均高于 benchmark，且最大回撤不高于 "
+            "benchmark。它只是研究优先级判断，不证明 Alpha、稳健性或实盘可交易性。"
+        )
+        title = "# Research Loop v1 研究报告"
     lines = [
-        "# Research Loop v1 研究报告",
+        title,
         "",
         f"- 标的：`{result.config.symbol}`",
         f"- 区间：`{result.simulation_start}` 至 `{result.simulation_end}`",
         f"- 初始资金：{result.config.initial_cash_fen / 100:,.2f} 元",
-        f"- 策略：SMA({result.config.sma_period}) → 冻结 Planner → 滚动组合",
+        f"- 策略：{strategy_description}",
         "- Benchmark：首个收盘生成一次目标仓位，次日开盘买入后持有",
         "",
         "## 核心结果",
@@ -391,12 +489,13 @@ def _markdown(result: ResearchLoopResult, assessment: str) -> str:
         "",
         "## 初步判断",
         "",
+        f"- A4_1_DECISION：`{assessment}`",
+        f"- DECISION_REASON：{_decision_reason(result, assessment)}",
+        "",
         verdict,
         "",
-        (
-            "门槛预先固定为：策略总收益与 Sharpe 均高于 benchmark，且最大回撤不高于 "
-            "benchmark。它只是研究优先级判断，不证明 Alpha、稳健性或实盘可交易性。"
-        ),
+        threshold_description,
+        "该判断不证明 Alpha、稳健性或实盘可交易性。",
         "",
         "## 审计边界",
         "",

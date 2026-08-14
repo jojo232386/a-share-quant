@@ -33,6 +33,8 @@ from datetime import date
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
+from aquant.risk.metrics import sample_standard_deviation
+
 
 class SignalError(ValueError):
     """Raised when signal inputs or outputs violate the frozen contract."""
@@ -283,6 +285,107 @@ class SmaSignal:
         return validate_signal_output(output, data)
 
 
+class VolatilityRegimeDefenseSignal:
+    """Single-symbol defensive allocation from causal realized volatility.
+
+    ``lookback_returns=N`` consumes the latest ``N`` simple close-to-close
+    returns and therefore requires ``N + 1`` causal ``indicator_close``
+    observations. Volatility uses the repository's existing sample standard
+    deviation convention (``ddof=1``) and is annualized by
+    ``sqrt(annualization)``.
+
+    A value at or below the threshold emits ACTIVE. A value above it emits the
+    existing explicit FLAT weight. Insufficient history and invalid arithmetic
+    omit the symbol (NO_DECISION); non-finite raw inputs remain rejected by
+    :class:`SignalInput` before this signal runs.
+    """
+
+    def __init__(
+        self,
+        *,
+        lookback_returns: int,
+        annualization: int,
+        volatility_threshold: Decimal,
+        active_weight: Decimal = Decimal("0.95"),
+    ) -> None:
+        if type(lookback_returns) is not int or lookback_returns < 2:
+            raise SignalError(
+                "invalid_lookback",
+                "lookback_returns must be an integer of at least two",
+            )
+        if type(annualization) is not int or annualization <= 0:
+            raise SignalError(
+                "invalid_annualization",
+                "annualization must be a positive integer",
+            )
+        _require_decimal_weight(volatility_threshold, symbol=None)
+        if volatility_threshold == 0:
+            raise SignalError(
+                "invalid_volatility_threshold",
+                "volatility_threshold must be strictly positive",
+            )
+        _require_decimal_weight(active_weight, symbol=None)
+        if active_weight == 0:
+            raise SignalError(
+                "invalid_active_weight",
+                "active_weight must be strictly positive",
+            )
+        self._lookback_returns = lookback_returns
+        self._annualization = annualization
+        self._volatility_threshold = volatility_threshold
+        self._active_weight = active_weight
+
+    @property
+    def lookback_returns(self) -> int:
+        return self._lookback_returns
+
+    @property
+    def annualization(self) -> int:
+        return self._annualization
+
+    @property
+    def volatility_threshold(self) -> Decimal:
+        return self._volatility_threshold
+
+    @property
+    def active_weight(self) -> Decimal:
+        return self._active_weight
+
+    def compute(self, as_of: date, data: SignalInput) -> Mapping[str, Decimal]:
+        _check_as_of(as_of, data)
+        if len(data.symbols) != 1:
+            raise SignalError(
+                "single_symbol_only",
+                "VolatilityRegimeDefenseSignal supports exactly one symbol",
+            )
+        symbol = data.symbols[0]
+        history = tuple(o for o in data.observations(symbol) if o.session <= as_of)
+        required_closes = self._lookback_returns + 1
+        if len(history) < required_closes:
+            return validate_signal_output({}, data)
+        closes = tuple(o.indicator_close for o in history[-required_closes:])
+        if any(close <= 0 for close in closes):
+            return validate_signal_output({}, data)
+        returns = tuple(
+            current / previous - 1.0
+            for previous, current in zip(closes[:-1], closes[1:], strict=True)
+        )
+        if any(not math.isfinite(value) for value in returns):
+            return validate_signal_output({}, data)
+        standard_deviation = sample_standard_deviation(returns)
+        if standard_deviation is None:
+            return validate_signal_output({}, data)
+        annualized_volatility = standard_deviation * math.sqrt(self._annualization)
+        if not math.isfinite(annualized_volatility):
+            return validate_signal_output({}, data)
+        output = (
+            {symbol: self._active_weight}
+            if annualized_volatility <= float(self._volatility_threshold)
+            else {symbol: Decimal("0")}
+        )
+        return validate_signal_output(output, data)
+
+
 _FIXED_DECIMAL_CONTEXT = decimal.Context(prec=50, rounding=decimal.ROUND_DOWN)
 
 
@@ -348,4 +451,5 @@ class TopKMomentumSignal:
 SIGNAL_REGISTRY: Mapping[str, type[Signal]] = {
     "sma": SmaSignal,
     "top_k_momentum": TopKMomentumSignal,
+    "volatility_regime_defense": VolatilityRegimeDefenseSignal,
 }

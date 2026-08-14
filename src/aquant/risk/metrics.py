@@ -34,7 +34,8 @@ class RiskMetrics:
     max_gross_exposure: float
 
 
-def _sample_standard_deviation(values: tuple[float, ...]) -> float | None:
+def sample_standard_deviation(values: tuple[float, ...]) -> float | None:
+    """Return the repository's frozen ``ddof=1`` float standard deviation."""
     if len(values) < 2:
         return None
     mean = math.fsum(values) / len(values)
@@ -109,7 +110,7 @@ def compute_risk_metrics(
     annualized_return = (equity[-1] / equity[0]) ** (
         _ANNUAL_SESSIONS / interval_count
     ) - 1.0
-    daily_standard_deviation = _sample_standard_deviation(daily_returns)
+    daily_standard_deviation = sample_standard_deviation(daily_returns)
     annualized_volatility = (
         daily_standard_deviation * math.sqrt(_ANNUAL_SESSIONS)
         if daily_standard_deviation is not None
