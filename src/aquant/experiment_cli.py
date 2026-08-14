@@ -23,6 +23,7 @@ from aquant.data.manifest import ManifestWriter
 from aquant.planner import PlannerLimits
 from aquant.research.loop import (
     STRATEGY_ABSOLUTE_MOMENTUM_252,
+    STRATEGY_MONTHLY_RELATIVE_MOMENTUM_2_12,
     STRATEGY_SMA,
     STRATEGY_VOLATILITY_REGIME_DEFENSE,
     ResearchLoopConfig,
@@ -76,7 +77,7 @@ def _parser() -> argparse.ArgumentParser:
 
     research = subparsers.add_parser(
         "research-loop",
-        help="run the verified single-symbol Research Loop v1",
+        help="run the verified Research Loop v1",
     )
     research.add_argument("--project-root", default=".")
     research.add_argument("--data-root", default=".")
@@ -84,8 +85,11 @@ def _parser() -> argparse.ArgumentParser:
     research.add_argument("--calendar-id", required=True)
     research.add_argument("--snapshot-id", required=True)
     research.add_argument("--corporate-action-snapshot-id", required=True)
+    research.add_argument("--secondary-snapshot-id")
+    research.add_argument("--secondary-corporate-action-snapshot-id")
     research.add_argument("--preregistration", required=True)
     research.add_argument("--symbol", required=True)
+    research.add_argument("--secondary-symbol")
     research.add_argument("--initial-cash-yuan", default="1000000.00")
     research.add_argument(
         "--strategy",
@@ -93,12 +97,15 @@ def _parser() -> argparse.ArgumentParser:
             STRATEGY_SMA,
             STRATEGY_VOLATILITY_REGIME_DEFENSE,
             STRATEGY_ABSOLUTE_MOMENTUM_252,
+            STRATEGY_MONTHLY_RELATIVE_MOMENTUM_2_12,
         ),
         default=STRATEGY_SMA,
     )
     research.add_argument("--sma-period", type=int, default=20)
     research.add_argument("--lookback-returns", type=int, default=20)
     research.add_argument("--lookback-sessions", type=int, default=252)
+    research.add_argument("--lookback-start-month", type=int, default=2)
+    research.add_argument("--lookback-end-month", type=int, default=12)
     research.add_argument("--annualization", type=int, default=252)
     research.add_argument("--volatility-threshold", default="0.25")
     research.add_argument("--active-weight", default="0.95")
@@ -284,12 +291,35 @@ def _run_research_loop_command(args) -> dict[str, object]:
         project_root,
         args.preregistration,
     )
-    identities = (
+    is_a4_3 = args.strategy == STRATEGY_MONTHLY_RELATIVE_MOMENTUM_2_12
+    secondary_values = (
+        args.secondary_symbol,
+        args.secondary_snapshot_id,
+        args.secondary_corporate_action_snapshot_id,
+    )
+    if is_a4_3 and any(value is None for value in secondary_values):
+        raise ExperimentCliError(
+            "invalid_arguments",
+            "A4-3 requires the frozen secondary symbol and both secondary input IDs",
+        )
+    if not is_a4_3 and any(value is not None for value in secondary_values):
+        raise ExperimentCliError(
+            "invalid_arguments",
+            "secondary inputs are reserved for the frozen A4-3 strategy",
+        )
+    identities = [
         args.universe_id,
         args.calendar_id,
         args.snapshot_id,
         args.corporate_action_snapshot_id,
-    )
+    ]
+    if is_a4_3:
+        identities.extend(
+            (
+                args.secondary_snapshot_id,
+                args.secondary_corporate_action_snapshot_id,
+            )
+        )
     if any(_HASH_RE.fullmatch(value) is None for value in identities):
         raise ExperimentCliError(
             "invalid_arguments",
@@ -318,6 +348,9 @@ def _run_research_loop_command(args) -> dict[str, object]:
         annualization=args.annualization,
         volatility_threshold=volatility_threshold,
         active_weight=active_weight,
+        secondary_symbol=args.secondary_symbol,
+        lookback_start_month=args.lookback_start_month,
+        lookback_end_month=args.lookback_end_month,
         limits=PlannerLimits(
             max_single_weight=active_weight,
             max_gross=active_weight,
@@ -328,13 +361,17 @@ def _run_research_loop_command(args) -> dict[str, object]:
         project_root / "configs" / "universes" / f"{args.universe_id}.json",
         expected_id=args.universe_id,
     )
+    market_records = ManifestWriter(
+        data_root / "data" / "manifests" / "manifest.jsonl"
+    ).read_all()
+    action_records = read_corporate_action_manifest(data_root)
     market_record = _exact_record(
-        ManifestWriter(data_root / "data" / "manifests" / "manifest.jsonl").read_all(),
+        market_records,
         identity=args.snapshot_id,
         label="market snapshot",
     )
     action_record = _exact_record(
-        read_corporate_action_manifest(data_root),
+        action_records,
         identity=args.corporate_action_snapshot_id,
         label="corporate-action snapshot",
     )
@@ -348,13 +385,47 @@ def _run_research_loop_command(args) -> dict[str, object]:
             "input_identity_mismatch",
             "requested snapshots do not belong to the requested symbol",
         )
+    if is_a4_3:
+        secondary_market_record = _exact_record(
+            market_records,
+            identity=args.secondary_snapshot_id,
+            label="secondary market snapshot",
+        )
+        secondary_action_record = _exact_record(
+            action_records,
+            identity=args.secondary_corporate_action_snapshot_id,
+            label="secondary corporate-action snapshot",
+        )
+        if (
+            secondary_market_record.symbol != args.secondary_symbol
+            or secondary_action_record.symbol != args.secondary_symbol
+        ):
+            raise ExperimentCliError(
+                "input_identity_mismatch",
+                "secondary snapshots do not belong to the frozen secondary symbol",
+            )
+        market_input = {
+            args.symbol: load_verified_snapshot(data_root, market_record),
+            args.secondary_symbol: load_verified_snapshot(
+                data_root, secondary_market_record
+            ),
+        }
+        action_input = {
+            args.symbol: load_verified_corporate_actions(data_root, action_record),
+            args.secondary_symbol: load_verified_corporate_actions(
+                data_root, secondary_action_record
+            ),
+        }
+    else:
+        market_input = load_verified_snapshot(data_root, market_record)
+        action_input = load_verified_corporate_actions(data_root, action_record)
     result = run_research_loop(
         git_head=git_head,
         preregistration_commit=preregistration_commit,
         preregistration_content=preregistration_content,
         config=config,
-        market_data=load_verified_snapshot(data_root, market_record),
-        corporate_actions=load_verified_corporate_actions(data_root, action_record),
+        market_data=market_input,
+        corporate_actions=action_input,
         calendar=load_verified_calendar(data_root, calendar_record),
         fee_policy=default_fee_policy(),
         universe=universe,

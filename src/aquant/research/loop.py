@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import date
 from decimal import Decimal
@@ -40,6 +40,7 @@ from aquant.portfolio import (
 )
 from aquant.research.signals import (
     AbsoluteMomentumSignal,
+    MonthlyRelativeMomentumSignal,
     SignalInput,
     SignalObservation,
     SmaSignal,
@@ -65,10 +66,11 @@ from aquant.rules import (
 )
 from aquant.universe import VerifiedUniverse, verify_universe
 
-RESEARCH_LOOP_SCHEMA_VERSION = "1.3.0"
+RESEARCH_LOOP_SCHEMA_VERSION = "1.4.0"
 STRATEGY_SMA = "sma"
 STRATEGY_VOLATILITY_REGIME_DEFENSE = "volatility_regime_defense"
 STRATEGY_ABSOLUTE_MOMENTUM_252 = "absolute_momentum_252"
+STRATEGY_MONTHLY_RELATIVE_MOMENTUM_2_12 = "monthly_relative_momentum_2_12"
 PREREGISTRATION_PRIMARY_METRICS = (
     "total_return",
     "sharpe_zero_rate",
@@ -138,6 +140,87 @@ A4_2_RESEARCH_SEMANTICS = {
     ),
     "warm_up": "fewer than 253 closes produces NO_DECISION",
 }
+A4_3_SECONDARY_METRICS = (
+    "total_return",
+    "trade_count",
+    "annualized_gross_turnover",
+)
+A4_3_INVALID_HANDLING = {
+    "invalid_monthly_endpoint": "whole strategy NO_DECISION",
+    "missing_one_symbol": "whole strategy NO_DECISION",
+    "non_finite_input": "SignalInput fails closed before producing a decision",
+    "non_finite_momentum": "whole strategy NO_DECISION",
+    "non_positive_close": "whole strategy NO_DECISION",
+}
+A4_3_RESEARCH_SEMANTICS = {
+    "benchmark": (
+        "initial 510300=0.475, 510500=0.475, cash=0.05 targets; "
+        "no later active rebalancing"
+    ),
+    "cash_target": "0.05",
+    "decision_schedule": (
+        "only the final official trading session of each natural month; all other "
+        "sessions are NO_NEW_DECISION and preserve the previous effective target"
+    ),
+    "missing_ranking_input": (
+        "if either eligible symbol lacks one required endpoint or has an invalid "
+        "endpoint, emit whole-strategy NO_DECISION; never shrink the ranking universe"
+    ),
+    "negative_momentum": (
+        "always hold the relative winner even when both momentum values are negative; "
+        "no absolute filter"
+    ),
+    "no_decision": (
+        "both symbols omitted so the existing Planner preserves the complete previous "
+        "target state"
+    ),
+    "numeric_convention": "float division on each existing causal indicator_close stream",
+    "price_series": (
+        "causal indicator_close available as of each official session close"
+    ),
+    "ranking": (
+        "higher momentum wins; exact ties break by ascending symbol, so 510300 wins"
+    ),
+    "return_definition": (
+        "at the final session of month t-1, indicator_close(end month t-2) / "
+        "indicator_close(end month t-13) - 1.0"
+    ),
+    "target": "winner Decimal('0.95'), loser Decimal('0'), cash Decimal('0.05')",
+    "window_semantics": (
+        "11 complete calendar-month cumulative return skipping the latest complete "
+        "month, using verified official month-end sessions"
+    ),
+    "warm_up": (
+        "first decision requires valid month-end endpoints for both symbols; "
+        "mechanically fixed first signal is 2019-01-31 and next-session execution is "
+        "2019-02-01"
+    ),
+}
+A4_3_BENCHMARK = {
+    "active_rebalancing": False,
+    "cash_weight": "0.05",
+    "initial_targets": {"510300": "0.475", "510500": "0.475"},
+    "type": "static_buy_and_hold",
+}
+A4_3_FORMAL_RUN_CONTROLS = {
+    "formal_rerun": False,
+    "max_formal_runs": 1,
+    "parameter_rescue": False,
+    "parameter_sweep": False,
+}
+A4_3_TURNOVER_UNIT = {
+    "annualized_gross_turnover": "secondary diagnostic only",
+    "gross_turnover": "raw ratio",
+    "threshold_raw_ratio": 100.0,
+    "threshold_percent_equivalent": "10000%",
+}
+A4_3_VALIDITY_CRITERIA = {
+    "execution_consistency": "required",
+    "invalid_data_behavior": "none",
+    "preregistration_implementation_binding": "required",
+    "provenance": "required",
+    "static_benchmark_consistency": "required",
+}
 A4_INSUFFICIENT_EVIDENCE_CRITERIA = (
     "incomplete_data",
     "provenance_failure",
@@ -183,6 +266,9 @@ class ResearchLoopConfig:
     annualization: int = 252
     volatility_threshold: Decimal = Decimal("0.25")
     active_weight: Decimal = Decimal("0.95")
+    secondary_symbol: str | None = None
+    lookback_start_month: int = 2
+    lookback_end_month: int = 12
     limits: PlannerLimits = PlannerLimits(
         max_single_weight=Decimal("0.95"),
         max_gross=Decimal("0.95"),
@@ -201,6 +287,7 @@ class ResearchLoopConfig:
                 STRATEGY_SMA,
                 STRATEGY_VOLATILITY_REGIME_DEFENSE,
                 STRATEGY_ABSOLUTE_MOMENTUM_252,
+                STRATEGY_MONTHLY_RELATIVE_MOMENTUM_2_12,
             }
             or (self.strategy == STRATEGY_SMA and (
                 type(self.sma_period) is not int or self.sma_period < 2
@@ -233,6 +320,23 @@ class ResearchLoopConfig:
                     min_cash_ratio=Decimal("0.05"),
                 )
             ))
+            or (self.strategy == STRATEGY_MONTHLY_RELATIVE_MOMENTUM_2_12 and (
+                self.symbol != "510300"
+                or self.secondary_symbol != "510500"
+                or self.lookback_start_month != 2
+                or self.lookback_end_month != 12
+                or self.active_weight != Decimal("0.95")
+                or self.limits
+                != PlannerLimits(
+                    max_single_weight=Decimal("0.95"),
+                    max_gross=Decimal("0.95"),
+                    min_cash_ratio=Decimal("0.05"),
+                )
+            ))
+            or (
+                self.strategy != STRATEGY_MONTHLY_RELATIVE_MOMENTUM_2_12
+                and self.secondary_symbol is not None
+            )
             or type(self.active_weight) is not Decimal
             or not self.active_weight.is_finite()
             or not Decimal("0") < self.active_weight <= Decimal("1")
@@ -245,6 +349,14 @@ class ResearchLoopConfig:
                 "invalid_config",
                 "research loop configuration is invalid",
             )
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        return (
+            (self.symbol, self.secondary_symbol)
+            if self.secondary_symbol is not None
+            else (self.symbol,)
+        )
 
 
 def research_config_payload(config: ResearchLoopConfig) -> dict[str, object]:
@@ -265,10 +377,20 @@ def research_config_payload(config: ResearchLoopConfig) -> dict[str, object]:
             "annualization": config.annualization,
             "volatility_threshold": str(config.volatility_threshold),
         }
+    if config.strategy == STRATEGY_ABSOLUTE_MOMENTUM_252:
+        return {
+            **common,
+            "strategy": STRATEGY_ABSOLUTE_MOMENTUM_252,
+            "lookback_sessions": config.lookback_sessions,
+        }
     return {
-        **common,
-        "strategy": STRATEGY_ABSOLUTE_MOMENTUM_252,
-        "lookback_sessions": config.lookback_sessions,
+        "active_weight": str(config.active_weight),
+        "initial_cash_fen": config.initial_cash_fen,
+        "limits": {key: str(value) for key, value in asdict(config.limits).items()},
+        "lookback_end_month": config.lookback_end_month,
+        "lookback_start_month": config.lookback_start_month,
+        "strategy": STRATEGY_MONTHLY_RELATIVE_MOMENTUM_2_12,
+        "symbols": list(config.symbols),
     }
 
 
@@ -336,6 +458,10 @@ class ResearchLoopResult:
     settlement_buffer_session: date
     strategy: ResearchPathResult
     benchmark: ResearchPathResult
+    market_snapshot_ids: tuple[tuple[str, str], ...] = ()
+    market_file_sha256s: tuple[tuple[str, str], ...] = ()
+    corporate_action_snapshot_ids: tuple[tuple[str, str], ...] = ()
+    corporate_action_file_sha256s: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -425,6 +551,91 @@ def _validated_sessions(
             "research loop requires two simulated sessions",
         )
     return simulation, buffer_session
+
+
+def _month_end_sessions(sessions: tuple[date, ...]) -> tuple[date, ...]:
+    month_ends: list[date] = []
+    for session in sessions:
+        if month_ends and (
+            month_ends[-1].year == session.year
+            and month_ends[-1].month == session.month
+        ):
+            month_ends[-1] = session
+        else:
+            month_ends.append(session)
+    return tuple(month_ends)
+
+
+def _validated_a4_3_sessions(
+    bars_by_symbol: Mapping[str, dict[date, _Bar]],
+    calendar: VerifiedTradingCalendar,
+) -> tuple[tuple[date, ...], date, tuple[date, ...]]:
+    if tuple(sorted(bars_by_symbol)) != ("510300", "510500"):
+        raise ResearchLoopError(
+            "input_identity_mismatch",
+            "A4-3 requires exactly the two frozen market-data symbols",
+        )
+    primary_sessions, buffer_session = _validated_sessions(
+        bars_by_symbol["510300"], calendar
+    )
+    for symbol in ("510300", "510500"):
+        dates = tuple(sorted(bars_by_symbol[symbol]))
+        if dates[0] != min(bars_by_symbol["510300"]) or dates[-1] != max(
+            bars_by_symbol["510300"]
+        ):
+            raise ResearchLoopError(
+                "calendar_market_mismatch",
+                "A4-3 market snapshots must have identical verified endpoints",
+            )
+    official_with_buffer = tuple(
+        session
+        for session in calendar.dates
+        if min(bars_by_symbol["510300"])
+        <= session
+        <= max(bars_by_symbol["510300"])
+    )
+    month_ends = _month_end_sessions(official_with_buffer)
+    first_signal: date | None = None
+    for position, decision_session in enumerate(month_ends):
+        if position < 12 or decision_session not in primary_sessions:
+            continue
+        numerator_session = month_ends[position - 1]
+        denominator_session = month_ends[position - 12]
+        valid = True
+        for symbol in ("510300", "510500"):
+            numerator = bars_by_symbol[symbol].get(numerator_session)
+            denominator = bars_by_symbol[symbol].get(denominator_session)
+            decision = bars_by_symbol[symbol].get(decision_session)
+            if (
+                numerator is None
+                or denominator is None
+                or decision is None
+                or numerator.indicator_close <= 0
+                or denominator.indicator_close <= 0
+            ):
+                valid = False
+                break
+        if valid:
+            first_signal = decision_session
+            break
+    if first_signal is None:
+        raise ResearchLoopError(
+            "insufficient_history",
+            "A4-3 has no uniquely valid first monthly signal session",
+        )
+    first_execution = calendar.next_session(first_signal)
+    if first_execution is None or first_execution not in primary_sessions:
+        raise ResearchLoopError(
+            "missing_settlement_buffer",
+            "A4-3 first signal has no simulated next-session execution",
+        )
+    simulation = tuple(session for session in primary_sessions if session >= first_signal)
+    if len(simulation) < 2:
+        raise ResearchLoopError(
+            "insufficient_history",
+            "A4-3 requires a signal baseline and at least one execution session",
+        )
+    return simulation, buffer_session, month_ends
 
 
 def _entitled_size(
@@ -602,6 +813,32 @@ def _valuations(
     )
 
 
+def _valuations_multi(
+    ledger: RollingPortfolioLedger,
+    *,
+    session: date,
+    marks: Mapping[str, Decimal],
+) -> tuple[SymbolValuation, ...]:
+    sizes: dict[str, list[int]] = {}
+    for lot in ledger.lots:
+        if lot.remaining_size == 0 or lot.acquired_date > session:
+            continue
+        values = sizes.setdefault(lot.symbol, [0, 0])
+        values[0] += lot.remaining_size
+        if lot.available_date <= session:
+            values[1] += lot.remaining_size
+    return tuple(
+        SymbolValuation(
+            symbol=symbol,
+            total_size=values[0],
+            available_size=values[1],
+            locked_size=values[0] - values[1],
+            mark_price=marks[symbol],
+        )
+        for symbol, values in sorted(sizes.items())
+    )
+
+
 def _execution_inputs(
     planned: PlannedTargets,
     *,
@@ -617,6 +854,28 @@ def _execution_inputs(
             execution_session=execution_session,
             previous_close=bar.reference_price if bar is not None else None,
             execution_open=bar.open if bar is not None else None,
+        )
+        for symbol in planned.targets
+    )
+
+
+def _execution_inputs_multi(
+    planned: PlannedTargets,
+    *,
+    execution_session: date,
+    bars: Mapping[str, _Bar | None],
+    instrument_kinds: Mapping[str, InstrumentKind],
+) -> tuple[RollingExecutionInput, ...]:
+    return tuple(
+        RollingExecutionInput(
+            symbol=symbol,
+            instrument_kind=instrument_kinds[symbol],
+            intent_session=planned.as_of,
+            execution_session=execution_session,
+            previous_close=(
+                bars[symbol].reference_price if bars[symbol] is not None else None
+            ),
+            execution_open=(bars[symbol].open if bars[symbol] is not None else None),
         )
         for symbol in planned.targets
     )
@@ -807,6 +1066,222 @@ def _simulate_path(
     )
 
 
+MultiPlanFactory = Callable[
+    [date, bool, Mapping[str, tuple[SignalObservation, ...]], PlannedTargets | None],
+    tuple[PlannedTargets | None, SignalDecision | None],
+]
+
+
+def _a4_3_strategy_plan_factory(
+    config: ResearchLoopConfig,
+    *,
+    month_end_sessions: tuple[date, ...],
+) -> MultiPlanFactory:
+    signal = MonthlyRelativeMomentumSignal(month_end_sessions=month_end_sessions)
+    eligible = frozenset(config.symbols)
+
+    def factory(
+        session: date,
+        data_available: bool,
+        observations: Mapping[str, tuple[SignalObservation, ...]],
+        previous: PlannedTargets | None,
+    ) -> tuple[PlannedTargets, SignalDecision]:
+        data = SignalInput(as_of=session, per_symbol=observations)
+        output = signal.compute(session, data) if data_available else {}
+        planned = plan_targets(
+            as_of=session,
+            signal_output=output,
+            previous=(
+                NoPreviousState(NoPreviousStateReason.FIRST_PERIOD)
+                if previous is None
+                else PreviousTargets(as_of=previous.as_of, targets=previous.targets)
+            ),
+            eligible_symbols=eligible,
+            limits=config.limits,
+        )
+        return planned, SignalDecision(
+            session=session,
+            data_available=data_available,
+            output=tuple(sorted(output.items())),
+        )
+
+    return factory
+
+
+def _a4_3_benchmark_plan_factory(config: ResearchLoopConfig) -> MultiPlanFactory:
+    emitted = False
+    eligible = frozenset(config.symbols)
+
+    def factory(
+        session: date,
+        data_available: bool,
+        _observations: Mapping[str, tuple[SignalObservation, ...]],
+        previous: PlannedTargets | None,
+    ) -> tuple[PlannedTargets, None]:
+        nonlocal emitted
+        if not emitted and not data_available:
+            raise ResearchLoopError(
+                "benchmark_initial_bar_missing",
+                "A4-3 static benchmark requires both initial signal-session bars",
+            )
+        output = (
+            {"510300": Decimal("0.475"), "510500": Decimal("0.475")}
+            if not emitted
+            else {}
+        )
+        planned = plan_targets(
+            as_of=session,
+            signal_output=output,
+            previous=(
+                NoPreviousState(NoPreviousStateReason.FIRST_PERIOD)
+                if previous is None
+                else PreviousTargets(as_of=previous.as_of, targets=previous.targets)
+            ),
+            eligible_symbols=eligible,
+            limits=config.limits,
+        )
+        emitted = True
+        return planned, None
+
+    return factory
+
+
+def _simulate_a4_3_path(
+    *,
+    label: str,
+    config: ResearchLoopConfig,
+    sessions: tuple[date, ...],
+    bars_by_symbol: Mapping[str, dict[date, _Bar]],
+    actions_by_symbol: Mapping[str, VerifiedCorporateActions],
+    calendar: VerifiedTradingCalendar,
+    fee_policy: VerifiedFeePolicy,
+    instrument_kinds: Mapping[str, InstrumentKind],
+    plan_factory: MultiPlanFactory,
+) -> ResearchPathResult:
+    ledger = create_rolling_ledger(config.initial_cash_fen)
+    pending_plan: PlannedTargets | None = None
+    previous_plan: PlannedTargets | None = None
+    observations: dict[str, list[SignalObservation]] = {
+        symbol: [
+            SignalObservation(session=session, indicator_close=bar.indicator_close)
+            for session, bar in sorted(bars_by_symbol[symbol].items())
+            if session < sessions[0]
+        ]
+        for symbol in config.symbols
+    }
+    plans: list[PlannedTargets] = []
+    decisions: list[SignalDecision] = []
+    attempts: list[RebalanceAttempt] = []
+    dividend_audits: list[DividendEventAudit] = []
+    missing: list[date] = []
+    marks: list[tuple[date, Decimal]] = []
+    current_marks = {
+        symbol: bars_by_symbol[symbol][sessions[0]].close for symbol in config.symbols
+    }
+    retry_required = False
+
+    for position, session in enumerate(sessions):
+        session_bars = {
+            symbol: bars_by_symbol[symbol].get(session) for symbol in config.symbols
+        }
+        data_available = all(bar is not None for bar in session_bars.values())
+        if not data_available:
+            missing.append(session)
+        for symbol, bar in session_bars.items():
+            if bar is not None:
+                current_marks[symbol] = bar.close
+                observations[symbol].append(
+                    SignalObservation(
+                        session=session,
+                        indicator_close=bar.indicator_close,
+                    )
+                )
+
+        receivables: list[CashReceivable] = []
+        for symbol in config.symbols:
+            symbol_receivables, session_audits = _session_dividends(
+                ledger,
+                session=session,
+                symbol=symbol,
+                actions=actions_by_symbol[symbol],
+                calendar=calendar,
+            )
+            receivables.extend(symbol_receivables)
+            dividend_audits.extend(session_audits)
+
+        if pending_plan is not None:
+            result = rebalance_to_plan(
+                config=RollingConfig(limits=config.limits),
+                planned=pending_plan,
+                ledger=ledger,
+                execution_inputs=_execution_inputs_multi(
+                    pending_plan,
+                    execution_session=session,
+                    bars=session_bars,
+                    instrument_kinds=instrument_kinds,
+                ),
+                calendar=calendar,
+                fee_policy=fee_policy,
+            )
+            ledger = result.ledger
+            attempts.extend(result.attempts)
+            retry_required = any(not target.is_aligned for target in result.targets)
+        else:
+            retry_required = False
+
+        ledger = _register_receivables(ledger, tuple(receivables))
+        ledger = _pay_receivables(ledger, session)
+        ledger = close_rolling_session(
+            ledger,
+            session,
+            _valuations_multi(ledger, session=session, marks=current_marks),
+        )
+        marks.append((session, current_marks[config.symbol]))
+
+        terminal = position == len(sessions) - 1
+        generated_plan, decision = plan_factory(
+            session,
+            data_available,
+            {symbol: tuple(values) for symbol, values in observations.items()},
+            previous_plan,
+        )
+        if decision is not None:
+            decisions.append(decision)
+        if generated_plan is not None:
+            plans.append(generated_plan)
+            target_changed = previous_plan is None or dict(generated_plan.targets) != dict(
+                previous_plan.targets
+            )
+            previous_plan = generated_plan
+            pending_plan = generated_plan if target_changed or retry_required else None
+        else:
+            pending_plan = None
+        if terminal:
+            pending_plan = None
+
+    verify_rolling_ledger(ledger)
+    equity, positions, fills = _metric_ledgers(ledger, tuple(marks))
+    metrics = compute_risk_metrics(
+        equity_curve=equity,
+        positions=positions,
+        fills=fills,
+    )
+    return ResearchPathResult(
+        label=label,
+        ledger=ledger,
+        plans=tuple(plans),
+        decisions=tuple(decisions),
+        attempts=tuple(attempts),
+        dividends=tuple(dividend_audits),
+        missing_market_sessions=tuple(missing),
+        mark_prices=tuple(marks),
+        equity_curve=equity,
+        positions=positions,
+        fills=fills,
+        metrics=metrics,
+    )
+
+
 def _strategy_plan_factory(config: ResearchLoopConfig) -> PlanFactory:
     if config.strategy == STRATEGY_SMA:
         signal = SmaSignal(config.sma_period, config.active_weight)
@@ -928,6 +1403,81 @@ def _validate_inputs(
     return provenance.instrument_kind, action_provenance
 
 
+def _validate_a4_3_inputs(
+    *,
+    config: ResearchLoopConfig,
+    market_data: Mapping[str, VerifiedMarketData],
+    corporate_actions: Mapping[str, VerifiedCorporateActions],
+    calendar: VerifiedTradingCalendar,
+    fee_policy: VerifiedFeePolicy,
+    universe: VerifiedUniverse,
+) -> tuple[dict[str, InstrumentKind], dict[str, object]]:
+    if type(config) is not ResearchLoopConfig:
+        raise TypeError("config must be an exact ResearchLoopConfig")
+    if not isinstance(market_data, Mapping) or not isinstance(
+        corporate_actions, Mapping
+    ):
+        raise TypeError("A4-3 market data and corporate actions must be mappings")
+    if tuple(sorted(market_data)) != config.symbols or tuple(
+        sorted(corporate_actions)
+    ) != config.symbols:
+        raise ResearchLoopError(
+            "input_identity_mismatch",
+            "A4-3 requires exact market and corporate-action inputs for both symbols",
+        )
+    verify_trading_calendar(calendar)
+    verify_fee_policy(fee_policy)
+    verify_universe(universe)
+    kinds: dict[str, InstrumentKind] = {}
+    action_provenance: dict[str, object] = {}
+    coverage: list[tuple[date, date]] = []
+    for symbol in config.symbols:
+        market = market_data[symbol]
+        actions = corporate_actions[symbol]
+        if type(market) is not VerifiedMarketData:
+            raise TypeError("A4-3 market data values must be exact VerifiedMarketData")
+        verify_verified_corporate_actions(actions)
+        provenance = market.provenance
+        action = actions.provenance
+        assert action is not None
+        if (
+            provenance.symbol != symbol
+            or action.symbol != symbol
+            or action.instrument_kind is not provenance.instrument_kind
+            or not universe.contains(symbol, provenance.instrument_kind.value)
+        ):
+            raise ResearchLoopError(
+                "input_identity_mismatch",
+                "A4-3 input identities must match the frozen two-symbol eligibility",
+            )
+        frame = market.frame
+        start = frame["date"].dt.date.iloc[0]
+        end = frame["date"].dt.date.iloc[-1]
+        if action.coverage_start > start or action.coverage_end < end:
+            raise ResearchLoopError(
+                "corporate_action_coverage_mismatch",
+                "A4-3 corporate-action coverage must span each market snapshot",
+            )
+        kinds[symbol] = provenance.instrument_kind
+        action_provenance[symbol] = action
+        coverage.append((start, end))
+    if len(set(coverage)) != 1 or len(set(kinds.values())) != 1:
+        raise ResearchLoopError(
+            "input_identity_mismatch",
+            "A4-3 inputs must share exact coverage and instrument kind",
+        )
+    return kinds, action_provenance
+
+
+def _a4_3_input_digest(market_data: Mapping[str, VerifiedMarketData]) -> str:
+    payload = {
+        symbol: market_data[symbol].input_digest for symbol in sorted(market_data)
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _identity_payload(
     *,
     git_head: str,
@@ -969,14 +1519,66 @@ def _identity_payload(
     }
 
 
+def _a4_3_identity_payload(
+    *,
+    git_head: str,
+    preregistration_commit: str,
+    preregistration_sha256: str,
+    implementation_digest: str,
+    market_data: Mapping[str, VerifiedMarketData],
+    corporate_actions: Mapping[str, VerifiedCorporateActions],
+    calendar: VerifiedTradingCalendar,
+    fee_policy: VerifiedFeePolicy,
+    universe: VerifiedUniverse,
+    config: ResearchLoopConfig,
+    simulation_start: date,
+    simulation_end: date,
+    settlement_buffer_session: date,
+) -> dict[str, object]:
+    return {
+        "schema_version": RESEARCH_LOOP_SCHEMA_VERSION,
+        "git_head": git_head,
+        "preregistration_commit": preregistration_commit,
+        "preregistration_sha256": preregistration_sha256,
+        "implementation_digest": implementation_digest,
+        "input_digest": _a4_3_input_digest(market_data),
+        "market_snapshot_ids": {
+            symbol: market_data[symbol].provenance.snapshot_id
+            for symbol in config.symbols
+        },
+        "market_file_sha256s": {
+            symbol: market_data[symbol].provenance.file_sha256
+            for symbol in config.symbols
+        },
+        "corporate_action_snapshot_ids": {
+            symbol: corporate_actions[symbol].provenance.snapshot_id
+            for symbol in config.symbols
+        },
+        "corporate_action_file_sha256s": {
+            symbol: corporate_actions[symbol].provenance.file_sha256
+            for symbol in config.symbols
+        },
+        "calendar_id": calendar.calendar_id,
+        "calendar_file_sha256": calendar.file_sha256,
+        "universe_id": universe.universe_id,
+        "fee_policy_digest": fee_policy.policy_digest,
+        "price_stream_version": PRICE_STREAM_VERSION,
+        "simulation_start": simulation_start.isoformat(),
+        "simulation_end": simulation_end.isoformat(),
+        "settlement_buffer_session": settlement_buffer_session.isoformat(),
+        "config": research_config_payload(config),
+    }
+
+
 def _validate_preregistration(
     content: bytes,
     *,
     config: ResearchLoopConfig,
     simulation_start: date,
     simulation_end: date,
-    market_data: VerifiedMarketData,
-    corporate_actions: VerifiedCorporateActions,
+    market_data: VerifiedMarketData | Mapping[str, VerifiedMarketData],
+    corporate_actions: VerifiedCorporateActions
+    | Mapping[str, VerifiedCorporateActions],
     calendar: VerifiedTradingCalendar,
     universe: VerifiedUniverse,
 ) -> str:
@@ -992,6 +1594,66 @@ def _validate_preregistration(
         "start": simulation_start.isoformat(),
         "end": simulation_end.isoformat(),
     }
+    if config.strategy == STRATEGY_MONTHLY_RELATIVE_MOMENTUM_2_12:
+        if not isinstance(market_data, Mapping) or not isinstance(
+            corporate_actions, Mapping
+        ):
+            raise ResearchLoopError(
+                "preregistration_mismatch",
+                "A4-3 preregistration requires both input identity mappings",
+            )
+        expected_inputs = {
+            "calendar_id": calendar.calendar_id,
+            "corporate_action_snapshot_ids": {
+                symbol: corporate_actions[symbol].provenance.snapshot_id
+                for symbol in config.symbols
+            },
+            "market_snapshot_ids": {
+                symbol: market_data[symbol].provenance.snapshot_id
+                for symbol in config.symbols
+            },
+            "universe_id": universe.universe_id,
+        }
+        first_execution = calendar.next_session(simulation_start)
+        mismatch = (
+            type(preregistration) is not dict
+            or type(preregistration.get("hypothesis")) is not str
+            or not preregistration["hypothesis"].strip()
+            or preregistration.get("hypothesis_id")
+            != "A4_3_510300_510500_MONTHLY_RELATIVE_MOMENTUM_2_12"
+            or preregistration.get("subject") != "510300,510500"
+            or preregistration.get("universe") != list(config.symbols)
+            or preregistration.get("evaluation_period") != expected_period
+            or preregistration.get("first_signal_session")
+            != simulation_start.isoformat()
+            or preregistration.get("first_execution_session")
+            != (first_execution.isoformat() if first_execution is not None else None)
+            or preregistration.get("benchmark") != A4_3_BENCHMARK
+            or preregistration.get("strategy_parameters") != expected_parameters
+            or preregistration.get("input_identities") != expected_inputs
+            or preregistration.get("primary_metrics") != list(A4_PRIMARY_METRICS)
+            or preregistration.get("secondary_metrics")
+            != list(A4_3_SECONDARY_METRICS)
+            or preregistration.get("pass_criteria") != A4_PASS_CRITERIA
+            or preregistration.get("reject_criteria")
+            != "any_core_threshold_failure"
+            or preregistration.get("invalid_handling") != A4_3_INVALID_HANDLING
+            or preregistration.get("research_semantics")
+            != A4_3_RESEARCH_SEMANTICS
+            or preregistration.get("insufficient_evidence_criteria")
+            != list(A4_INSUFFICIENT_EVIDENCE_CRITERIA)
+            or preregistration.get("validity_criteria")
+            != A4_3_VALIDITY_CRITERIA
+            or preregistration.get("formal_run_controls")
+            != A4_3_FORMAL_RUN_CONTROLS
+            or preregistration.get("turnover_unit") != A4_3_TURNOVER_UNIT
+        )
+        if mismatch:
+            raise ResearchLoopError(
+                "preregistration_mismatch",
+                "A4-3 preregistration must match every frozen research field",
+            )
+        return hashlib.sha256(content).hexdigest()
     common_mismatch = (
         type(preregistration) is not dict
         or type(preregistration.get("hypothesis")) is not str
@@ -1053,8 +1715,9 @@ def run_research_loop(
     preregistration_commit: str,
     preregistration_content: bytes,
     config: ResearchLoopConfig,
-    market_data: VerifiedMarketData,
-    corporate_actions: VerifiedCorporateActions,
+    market_data: VerifiedMarketData | Mapping[str, VerifiedMarketData],
+    corporate_actions: VerifiedCorporateActions
+    | Mapping[str, VerifiedCorporateActions],
     calendar: VerifiedTradingCalendar,
     fee_policy: VerifiedFeePolicy,
     universe: VerifiedUniverse,
@@ -1072,6 +1735,135 @@ def run_research_loop(
         raise ResearchLoopError(
             "invalid_provenance_identity",
             "formal research provenance identity is invalid",
+        )
+    if config.strategy == STRATEGY_MONTHLY_RELATIVE_MOMENTUM_2_12:
+        if not isinstance(market_data, Mapping) or not isinstance(
+            corporate_actions, Mapping
+        ):
+            raise ResearchLoopError(
+                "input_identity_mismatch",
+                "A4-3 requires two-symbol verified input mappings",
+            )
+        instrument_kinds, _ = _validate_a4_3_inputs(
+            config=config,
+            market_data=market_data,
+            corporate_actions=corporate_actions,
+            calendar=calendar,
+            fee_policy=fee_policy,
+            universe=universe,
+        )
+        bars_by_symbol = {
+            symbol: _bar_map(market_data[symbol], corporate_actions[symbol])
+            for symbol in config.symbols
+        }
+        sessions, buffer_session, month_ends = _validated_a4_3_sessions(
+            bars_by_symbol, calendar
+        )
+        preregistration_sha256 = _validate_preregistration(
+            preregistration_content,
+            config=config,
+            simulation_start=sessions[0],
+            simulation_end=sessions[-1],
+            market_data=market_data,
+            corporate_actions=corporate_actions,
+            calendar=calendar,
+            universe=universe,
+        )
+        strategy = _simulate_a4_3_path(
+            label=f"{config.strategy}_planner",
+            config=config,
+            sessions=sessions,
+            bars_by_symbol=bars_by_symbol,
+            actions_by_symbol=corporate_actions,
+            calendar=calendar,
+            fee_policy=fee_policy,
+            instrument_kinds=instrument_kinds,
+            plan_factory=_a4_3_strategy_plan_factory(
+                config, month_end_sessions=month_ends
+            ),
+        )
+        benchmark = _simulate_a4_3_path(
+            label="static_buy_and_hold",
+            config=config,
+            sessions=sessions,
+            bars_by_symbol=bars_by_symbol,
+            actions_by_symbol=corporate_actions,
+            calendar=calendar,
+            fee_policy=fee_policy,
+            instrument_kinds=instrument_kinds,
+            plan_factory=_a4_3_benchmark_plan_factory(config),
+        )
+        implementation_digest = _implementation_digest()
+        identity = _a4_3_identity_payload(
+            git_head=git_head,
+            preregistration_commit=preregistration_commit,
+            preregistration_sha256=preregistration_sha256,
+            implementation_digest=implementation_digest,
+            market_data=market_data,
+            corporate_actions=corporate_actions,
+            calendar=calendar,
+            fee_policy=fee_policy,
+            universe=universe,
+            config=config,
+            simulation_start=sessions[0],
+            simulation_end=sessions[-1],
+            settlement_buffer_session=buffer_session,
+        )
+        run_id = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        primary_market = market_data[config.symbol]
+        primary_action = corporate_actions[config.symbol].provenance
+        assert primary_action is not None
+        return ResearchLoopResult(
+            schema_version=RESEARCH_LOOP_SCHEMA_VERSION,
+            run_id=run_id,
+            git_head=git_head,
+            preregistration_commit=preregistration_commit,
+            preregistration_sha256=preregistration_sha256,
+            implementation_digest=implementation_digest,
+            input_digest=_a4_3_input_digest(market_data),
+            market_snapshot_id=primary_market.provenance.snapshot_id,
+            market_file_sha256=primary_market.provenance.file_sha256,
+            corporate_action_snapshot_id=primary_action.snapshot_id,
+            corporate_action_file_sha256=primary_action.file_sha256,
+            calendar_id=calendar.calendar_id,
+            calendar_file_sha256=calendar.file_sha256,
+            universe_id=universe.universe_id,
+            fee_policy_digest=fee_policy.policy_digest,
+            price_stream_version=PRICE_STREAM_VERSION,
+            config=config,
+            instrument_kind=instrument_kinds[config.symbol],
+            simulation_start=sessions[0],
+            simulation_end=sessions[-1],
+            settlement_buffer_session=buffer_session,
+            strategy=strategy,
+            benchmark=benchmark,
+            market_snapshot_ids=tuple(
+                (symbol, market_data[symbol].provenance.snapshot_id)
+                for symbol in config.symbols
+            ),
+            market_file_sha256s=tuple(
+                (symbol, market_data[symbol].provenance.file_sha256)
+                for symbol in config.symbols
+            ),
+            corporate_action_snapshot_ids=tuple(
+                (symbol, corporate_actions[symbol].provenance.snapshot_id)
+                for symbol in config.symbols
+            ),
+            corporate_action_file_sha256s=tuple(
+                (symbol, corporate_actions[symbol].provenance.file_sha256)
+                for symbol in config.symbols
+            ),
+        )
+    if type(market_data) is not VerifiedMarketData or type(
+        corporate_actions
+    ) is not VerifiedCorporateActions:
+        raise ResearchLoopError(
+            "input_identity_mismatch",
+            "single-symbol research requires exact single-symbol inputs",
         )
     instrument_kind, action_provenance = _validate_inputs(
         config=config,

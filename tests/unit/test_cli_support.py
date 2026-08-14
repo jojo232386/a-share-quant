@@ -97,7 +97,7 @@ def test_write_json_preserves_sorted_utf8_compact_newline_output():
         (backtest_parser, "ba8189f69ebfb92152b2830047a41e48ec0f4909fbad34070b8de67ffd2d8c27"),
         (data_parser, "7fd566e6f70d0cce186a5e7794dfd0d470075ba2a1df64d3840dc3cb45f66677"),
         (report_parser, "82db437c5aae8774b99b173fad74e54d931c9e1fa4ad64abb7f90426939999f5"),
-        (experiment_parser, "278864b6aedeb2c3393713417277fff3a9f83b0745bcb7d046a045543853d5d4"),
+            (experiment_parser, "e9356d749a5df84be690a780402b7606c18179025258e491f45f516c9d47cf52"),
         (portfolio_parser, "e0585dfe5aa1ca8a6eed6427cdf20978b004412028783a780da1f9da64d05824"),
         (release_parser, "ad6df0d93ab4100c8164af2a08dab7878db828e6e83cfd2fbc9b7637709ff79d"),
     ),
