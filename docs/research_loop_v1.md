@@ -39,7 +39,7 @@ macOS `UF_HIDDEN` 文件标志，CPython 3.11.15 的 `site.py` 因该标志跳�
 并可正常导入。现有证据不能确认是谁在原环境创建后追加了该标志，因此 formal runtime
 不修改或依赖 `.pth`，而是使用隔离的非 editable wheel 安装。
 
-正式运行还必须通过 `--preregistration` 指向仓库内的 JSON 研究预注册文件。该文件必须在运行前已提交，且工作树必须干净；程序会自动绑定完整 Git HEAD、该文件最后修改的 commit 和内容 SHA-256。预注册必须绑定与策略匹配的指标、判断门槛、参数和真实输入身份。原 SMA 路径保留原有预注册口径；A4-1 另行冻结年化收益、Sharpe、最大回撤和毛换手率门槛。
+正式运行还必须通过 `--preregistration` 指向仓库内的 JSON 研究预注册文件。该文件必须在运行前已提交，且工作树必须干净；程序会自动绑定完整 Git HEAD、该文件最后修改的 commit 和内容 SHA-256。预注册必须绑定与策略匹配的指标、判断门槛、参数和真实输入身份。原 SMA 路径保留原有预注册口径；A4-1 与 A4-2 分别冻结自己的策略语义，并共用已预先固定的年化收益、Sharpe、最大回撤和毛换手率门槛。
 
 - `hypothesis`；
 - 与当次单标的运行一致的 `universe` 和 `evaluation_period`；
@@ -48,7 +48,7 @@ macOS `UF_HIDDEN` 文件标志，CPython 3.11.15 的 `site.py` 因该标志跳�
 - 与现有 assessment 规则一致的 `pass_criteria` 和 `reject_criteria`；
 - 与当次 CLI 实际配置一致的 `strategy_parameters`。
 
-任一内容不匹配、未提交或运行前被修改，都会在产生正式 result artifact 前失败。A4-1 还会核对行情、公司行动、交易日历和 universe 的四个精确 ID。
+任一内容不匹配、未提交或运行前被修改，都会在产生正式 result artifact 前失败。A4-1 与 A4-2 还会核对行情、公司行动、交易日历和 universe 的四个精确 ID。
 
 ```bash
 ./scripts/formal_research_runtime.sh run -- research-loop \
@@ -81,6 +81,24 @@ A4-1 只增加一个 Signal 实现；Planner、Portfolio、成交、费用和 ar
   --lookback-returns 20 \
   --annualization 252 \
   --volatility-threshold 0.25 \
+  --initial-cash-yuan 1000000.00 \
+  --active-weight 0.95
+```
+
+A4-2 同样只增加一个 research-layer Signal 实现。其参数固定为 252 个交易期的绝对时间序列动量、零阈值和 95% ACTIVE 权重：`indicator_close[t] / indicator_close[t-252] - 1` 严格大于零时 ACTIVE，小于或等于零时 FLAT。252 个交易期需要 253 个因果可用的 `indicator_close`；不足时为 NO_DECISION。Signal 在 T 日收盘后决定目标，仍由既有 Planner 在下一交易日开盘执行。
+
+```bash
+./scripts/formal_research_runtime.sh run -- research-loop \
+  --project-root . \
+  --data-root /path/to/a-share-quant-data \
+  --universe-id bba6760fa738a829bb09a72f0c90919aeba02429018b8fd189c65e2d6c82a20e \
+  --calendar-id fb24e5167d11fee3a58869f8de7910a0ea979d55d3481698bc5baf18cd508983 \
+  --snapshot-id 904e594e09d5baad4e70c626129b88bef1a596b755a0731ca234d240b02a8071 \
+  --corporate-action-snapshot-id b16ca276bf8d76637c47a1ae68c85a498f87fb17985262bb529338420903e370 \
+  --preregistration configs/research/a4_2_510300_absolute_momentum_252.json \
+  --symbol 510300 \
+  --strategy absolute_momentum_252 \
+  --lookback-sessions 252 \
   --initial-cash-yuan 1000000.00 \
   --active-weight 0.95
 ```
@@ -143,6 +161,33 @@ commit `0596352933b617adbb12df881f195fd59264c1a9` 与内容 SHA-256
 
 该 hypothesis 在 A4-1 止步；不改参、不重跑、不启动 A4-2。该结论仅是本次预注册的单标的
 全样本研究判定，不证明实盘可行性或收益保证。
+
+## A4-2 formal research closeout
+
+2026-08-14 在刷新后的 `origin/main`
+`dde769bde9f46210b8d75a1bfa39bf918eb828aa` 上独立完成 A4-2。预注册先以 commit
+`abeb48db12637d4eec1d2058ebfaaf9658b7938a` 冻结，内容 SHA-256 为
+`9863a433df141f08f8839fb818cc5da31b5d4d524efb01d708b4836844195b42`。所有工程验收通过后，
+唯一一次 fresh formal run 使用锁定的非 editable wheel，绑定 Git HEAD
+`56eff0ac5aee6d2db644150d6ec651e092b0a1ac`、tree
+`53a76b2b07ece07c62946cfb3b1bfb790409e973` 与 wheel SHA-256
+`f5fca956ac79ec63f59c91aab9256c3856f3a0f6821c088b7f9f8101e4fb7b3e`。
+
+- run ID：`4dbc0db47cdb3d1aa8ec399f0265c7abc31dd433137f4c0a3f610384ce18d532`；
+- artifact manifest SHA-256：`1d0f41009fb33aa45f777b6b887813c067534cc34691f98d53365a44aa74385d`；
+- `run.json` SHA-256：`4f36da149c29f80c3b64413434ebec4b808e1f420add71b5b0f7f49c5f987579`；
+- `metrics.json` SHA-256：`e1ee08ed629da5426f8f7c2cc5f6a2ac4ac2792b32c10b3d0715b30bacb33b2f`；
+- 策略：总收益 31.79%，年化收益 3.41%，最大回撤 23.59%，Sharpe 0.319，毛换手率
+  3,058.77%，35 笔成交；
+- benchmark：总收益 30.03%，年化收益 3.24%，最大回撤 38.49%，Sharpe 0.269；
+- 预注册判定：`REJECT`。年化收益、最大回撤和毛换手率门槛通过；Sharpe 相对 benchmark
+  仅提高 0.050，未达到预注册要求的 0.10，因此唯一失败项为 `sharpe_zero_rate`；
+- artifact manifest 的 8 个文件已逐一重算 SHA-256；信号状态为 1,071 个 ACTIVE、752 个
+  FLAT、252 个 NO_DECISION，符合 253 个收盘才产生首个决策的冻结语义。
+
+该 hypothesis 在 A4-2 止步。`FORMAL_RUN_COUNT=1`、`PARAMETER_RESCUE=FALSE`、
+`FORMAL_RERUN=FALSE`；Planner、Portfolio、accounting 与成交语义均未改变，且未启动 A4-3。
+该结论仅是本次预注册的单标的全样本研究判定，不证明实盘可行性或收益保证。
 
 ## 明确延后
 

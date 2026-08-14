@@ -20,6 +20,7 @@ from aquant.data.manifest import ManifestWriter
 from aquant.release_synthetic import build_public_v01_inputs
 from aquant.research.signals import (
     SIGNAL_REGISTRY,
+    AbsoluteMomentumSignal,
     Signal,
     SignalError,
     SignalInput,
@@ -391,7 +392,76 @@ def test_volatility_defense_rejects_invalid_parameters():
 
 
 # ---------------------------------------------------------------------------
-# D. Canonical baseline classification equivalence (public v01 fixture)
+# D. A4-2 absolute momentum
+# ---------------------------------------------------------------------------
+
+
+def _absolute_momentum_signal(
+    *, lookback_sessions: int = 252
+) -> AbsoluteMomentumSignal:
+    return AbsoluteMomentumSignal(
+        lookback_sessions=lookback_sessions,
+        active_weight=Decimal("0.95"),
+    )
+
+
+def test_absolute_momentum_requires_253_closes_for_252_sessions():
+    insufficient = _input(*([10.0] * 252))
+    assert _absolute_momentum_signal().compute(insufficient.as_of, insufficient) == {}
+    sufficient = _input(*([10.0] * 252), 10.1)
+    assert _absolute_momentum_signal().compute(sufficient.as_of, sufficient) == {
+        _SYMBOL: Decimal("0.95")
+    }
+
+
+def test_absolute_momentum_positive_return_is_active():
+    data = _input(10.0, 9.0, 11.0)
+    assert _absolute_momentum_signal(lookback_sessions=2).compute(data.as_of, data) == {
+        _SYMBOL: Decimal("0.95")
+    }
+
+
+def test_absolute_momentum_negative_or_zero_return_is_flat():
+    for closes in ((10.0, 11.0, 9.0), (10.0, 11.0, 10.0)):
+        data = _input(*closes)
+        assert _absolute_momentum_signal(lookback_sessions=2).compute(
+            data.as_of, data
+        ) == {_SYMBOL: Decimal("0")}
+
+
+def test_absolute_momentum_invalid_endpoint_fails_closed():
+    data = _input(0.0, 11.0, 12.0)
+    assert _absolute_momentum_signal(lookback_sessions=2).compute(data.as_of, data) == {}
+    with pytest.raises(SignalError) as exc:
+        _input(10.0, 11.0, float("nan"))
+    assert exc.value.code == "invalid_indicator_close"
+
+
+def test_absolute_momentum_is_deterministic_and_single_symbol():
+    data = _input(10.0, 11.0, 12.0)
+    signal = _absolute_momentum_signal(lookback_sessions=2)
+    assert signal.compute(data.as_of, data) == signal.compute(data.as_of, data)
+    multiple = _input(10.0, 11.0, 12.0, symbols=("510300", "510500"))
+    with pytest.raises(SignalError) as exc:
+        signal.compute(multiple.as_of, multiple)
+    assert exc.value.code == "single_symbol_only"
+
+
+def test_absolute_momentum_rejects_invalid_parameters():
+    for arguments, code in (
+        ({"lookback_sessions": 0}, "invalid_lookback"),
+        (
+            {"lookback_sessions": 252, "active_weight": Decimal("0")},
+            "invalid_active_weight",
+        ),
+    ):
+        with pytest.raises(SignalError) as exc:
+            AbsoluteMomentumSignal(**arguments)
+        assert exc.value.code == code
+
+
+# ---------------------------------------------------------------------------
+# E. Canonical baseline classification equivalence (public v01 fixture)
 # ---------------------------------------------------------------------------
 
 
@@ -711,11 +781,12 @@ def test_top_k_deterministic_under_changed_caller_decimal_context():
 
 
 # ---------------------------------------------------------------------------
-# F. Interface and registry
+# G. Interface and registry
 # ---------------------------------------------------------------------------
 
 
 def test_signal_classes_satisfy_explicit_protocol():
+    assert isinstance(_absolute_momentum_signal(), Signal)
     assert isinstance(SmaSignal(period=2), Signal)
     assert isinstance(TopKMomentumSignal(lookback=1, k=1), Signal)
     assert isinstance(_volatility_signal(), Signal)

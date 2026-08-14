@@ -39,6 +39,7 @@ from aquant.portfolio import (
     decimal_yuan_to_fen,
 )
 from aquant.research.signals import (
+    AbsoluteMomentumSignal,
     SignalInput,
     SignalObservation,
     SmaSignal,
@@ -64,9 +65,10 @@ from aquant.rules import (
 )
 from aquant.universe import VerifiedUniverse, verify_universe
 
-RESEARCH_LOOP_SCHEMA_VERSION = "1.2.0"
+RESEARCH_LOOP_SCHEMA_VERSION = "1.3.0"
 STRATEGY_SMA = "sma"
 STRATEGY_VOLATILITY_REGIME_DEFENSE = "volatility_regime_defense"
+STRATEGY_ABSOLUTE_MOMENTUM_252 = "absolute_momentum_252"
 PREREGISTRATION_PRIMARY_METRICS = (
     "total_return",
     "sharpe_zero_rate",
@@ -116,6 +118,26 @@ A4_RESEARCH_SEMANTICS = {
     ),
     "warm_up": "fewer than 20 returns produces NO_DECISION",
 }
+A4_2_INVALID_HANDLING = {
+    "non_finite_input": "SignalInput fails closed before producing a decision",
+    "non_finite_trailing_return": "NO_DECISION",
+    "non_positive_close": "NO_DECISION",
+}
+A4_2_RESEARCH_SEMANTICS = {
+    "flat": "explicit Decimal('0') target passed through the existing Planner",
+    "no_decision": "symbol omitted so the existing Planner preserves the previous target",
+    "numeric_convention": "float division on the existing indicator_close stream",
+    "price_series": "causal indicator_close available as of the session close",
+    "return_definition": "indicator_close[t] / indicator_close[t-252] - 1.0",
+    "threshold_boundary": (
+        "trailing_252_session_return > 0 is ACTIVE; "
+        "trailing_252_session_return <= 0 is FLAT"
+    ),
+    "window_semantics": (
+        "252 trading-session intervals ending at as_of, requiring 253 valid closes"
+    ),
+    "warm_up": "fewer than 253 closes produces NO_DECISION",
+}
 A4_INSUFFICIENT_EVIDENCE_CRITERIA = (
     "incomplete_data",
     "provenance_failure",
@@ -157,6 +179,7 @@ class ResearchLoopConfig:
     strategy: str = STRATEGY_SMA
     sma_period: int = 20
     lookback_returns: int = 20
+    lookback_sessions: int = 252
     annualization: int = 252
     volatility_threshold: Decimal = Decimal("0.25")
     active_weight: Decimal = Decimal("0.95")
@@ -174,7 +197,11 @@ class ResearchLoopConfig:
             or type(self.initial_cash_fen) is not int
             or isinstance(self.initial_cash_fen, bool)
             or self.initial_cash_fen <= 0
-            or self.strategy not in {STRATEGY_SMA, STRATEGY_VOLATILITY_REGIME_DEFENSE}
+            or self.strategy not in {
+                STRATEGY_SMA,
+                STRATEGY_VOLATILITY_REGIME_DEFENSE,
+                STRATEGY_ABSOLUTE_MOMENTUM_252,
+            }
             or (self.strategy == STRATEGY_SMA and (
                 type(self.sma_period) is not int or self.sma_period < 2
             ))
@@ -186,6 +213,18 @@ class ResearchLoopConfig:
                 or self.annualization != 252
                 or type(self.volatility_threshold) is not Decimal
                 or self.volatility_threshold != Decimal("0.25")
+                or self.active_weight != Decimal("0.95")
+                or self.limits
+                != PlannerLimits(
+                    max_single_weight=Decimal("0.95"),
+                    max_gross=Decimal("0.95"),
+                    min_cash_ratio=Decimal("0.05"),
+                )
+            ))
+            or (self.strategy == STRATEGY_ABSOLUTE_MOMENTUM_252 and (
+                self.symbol != "510300"
+                or type(self.lookback_sessions) is not int
+                or self.lookback_sessions != 252
                 or self.active_weight != Decimal("0.95")
                 or self.limits
                 != PlannerLimits(
@@ -218,12 +257,18 @@ def research_config_payload(config: ResearchLoopConfig) -> dict[str, object]:
     }
     if config.strategy == STRATEGY_SMA:
         return {**common, "sma_period": config.sma_period}
+    if config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE:
+        return {
+            **common,
+            "strategy": STRATEGY_VOLATILITY_REGIME_DEFENSE,
+            "lookback_returns": config.lookback_returns,
+            "annualization": config.annualization,
+            "volatility_threshold": str(config.volatility_threshold),
+        }
     return {
         **common,
-        "strategy": STRATEGY_VOLATILITY_REGIME_DEFENSE,
-        "lookback_returns": config.lookback_returns,
-        "annualization": config.annualization,
-        "volatility_threshold": str(config.volatility_threshold),
+        "strategy": STRATEGY_ABSOLUTE_MOMENTUM_252,
+        "lookback_sessions": config.lookback_sessions,
     }
 
 
@@ -763,16 +808,20 @@ def _simulate_path(
 
 
 def _strategy_plan_factory(config: ResearchLoopConfig) -> PlanFactory:
-    signal = (
-        SmaSignal(config.sma_period, config.active_weight)
-        if config.strategy == STRATEGY_SMA
-        else VolatilityRegimeDefenseSignal(
+    if config.strategy == STRATEGY_SMA:
+        signal = SmaSignal(config.sma_period, config.active_weight)
+    elif config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE:
+        signal = VolatilityRegimeDefenseSignal(
             lookback_returns=config.lookback_returns,
             annualization=config.annualization,
             volatility_threshold=config.volatility_threshold,
             active_weight=config.active_weight,
         )
-    )
+    else:
+        signal = AbsoluteMomentumSignal(
+            lookback_sessions=config.lookback_sessions,
+            active_weight=config.active_weight,
+        )
 
     def factory(
         session: date,
@@ -968,17 +1017,24 @@ def _validate_preregistration(
             "market_snapshot_id": market_data.provenance.snapshot_id,
             "universe_id": universe.universe_id,
         }
+        if config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE:
+            expected_hypothesis_id = "A4_1_510300_VOLATILITY_REGIME_DEFENSE"
+            expected_invalid_handling = A4_INVALID_HANDLING
+            expected_research_semantics = A4_RESEARCH_SEMANTICS
+        else:
+            expected_hypothesis_id = "A4_2_510300_ABSOLUTE_MOMENTUM_252"
+            expected_invalid_handling = A4_2_INVALID_HANDLING
+            expected_research_semantics = A4_2_RESEARCH_SEMANTICS
         strategy_mismatch = (
-            preregistration.get("hypothesis_id")
-            != "A4_1_510300_VOLATILITY_REGIME_DEFENSE"
+            preregistration.get("hypothesis_id") != expected_hypothesis_id
             or preregistration.get("subject") != config.symbol
             or preregistration.get("input_identities") != expected_inputs
             or preregistration.get("primary_metrics") != list(A4_PRIMARY_METRICS)
             or preregistration.get("secondary_metrics") != list(A4_SECONDARY_METRICS)
             or preregistration.get("pass_criteria") != A4_PASS_CRITERIA
             or preregistration.get("reject_criteria") != "any_core_threshold_failure"
-            or preregistration.get("invalid_handling") != A4_INVALID_HANDLING
-            or preregistration.get("research_semantics") != A4_RESEARCH_SEMANTICS
+            or preregistration.get("invalid_handling") != expected_invalid_handling
+            or preregistration.get("research_semantics") != expected_research_semantics
             or preregistration.get("insufficient_evidence_criteria")
             != list(A4_INSUFFICIENT_EVIDENCE_CRITERIA)
             or preregistration.get("validity_criteria") != A4_VALIDITY_CRITERIA

@@ -22,6 +22,7 @@ from aquant.data.corporate_actions import (
 from aquant.data.manifest import ManifestWriter
 from aquant.planner import PlannerLimits
 from aquant.research.loop import (
+    STRATEGY_ABSOLUTE_MOMENTUM_252,
     STRATEGY_SMA,
     STRATEGY_VOLATILITY_REGIME_DEFENSE,
     ResearchLoopConfig,
@@ -88,11 +89,16 @@ def _parser() -> argparse.ArgumentParser:
     research.add_argument("--initial-cash-yuan", default="1000000.00")
     research.add_argument(
         "--strategy",
-        choices=(STRATEGY_SMA, STRATEGY_VOLATILITY_REGIME_DEFENSE),
+        choices=(
+            STRATEGY_SMA,
+            STRATEGY_VOLATILITY_REGIME_DEFENSE,
+            STRATEGY_ABSOLUTE_MOMENTUM_252,
+        ),
         default=STRATEGY_SMA,
     )
     research.add_argument("--sma-period", type=int, default=20)
     research.add_argument("--lookback-returns", type=int, default=20)
+    research.add_argument("--lookback-sessions", type=int, default=252)
     research.add_argument("--annualization", type=int, default=252)
     research.add_argument("--volatility-threshold", default="0.25")
     research.add_argument("--active-weight", default="0.95")
@@ -308,6 +314,7 @@ def _run_research_loop_command(args) -> dict[str, object]:
         strategy=args.strategy,
         sma_period=args.sma_period,
         lookback_returns=args.lookback_returns,
+        lookback_sessions=args.lookback_sessions,
         annualization=args.annualization,
         volatility_threshold=volatility_threshold,
         active_weight=active_weight,

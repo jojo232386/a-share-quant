@@ -386,6 +386,71 @@ class VolatilityRegimeDefenseSignal:
         return validate_signal_output(output, data)
 
 
+class AbsoluteMomentumSignal:
+    """Single-symbol absolute momentum on the causal indicator-price stream.
+
+    ``lookback_sessions=N`` measures exactly ``N`` trading-session intervals,
+    so the signal requires ``N + 1`` causal ``indicator_close`` observations.
+    A strictly positive trailing return emits ACTIVE; zero or a negative return
+    emits the existing explicit FLAT weight. Insufficient history and invalid
+    endpoint arithmetic omit the symbol (NO_DECISION).
+    """
+
+    def __init__(
+        self,
+        *,
+        lookback_sessions: int,
+        active_weight: Decimal = Decimal("0.95"),
+    ) -> None:
+        if type(lookback_sessions) is not int or lookback_sessions <= 0:
+            raise SignalError(
+                "invalid_lookback",
+                "lookback_sessions must be a positive integer",
+            )
+        _require_decimal_weight(active_weight, symbol=None)
+        if active_weight == 0:
+            raise SignalError(
+                "invalid_active_weight",
+                "active_weight must be strictly positive",
+            )
+        self._lookback_sessions = lookback_sessions
+        self._active_weight = active_weight
+
+    @property
+    def lookback_sessions(self) -> int:
+        return self._lookback_sessions
+
+    @property
+    def active_weight(self) -> Decimal:
+        return self._active_weight
+
+    def compute(self, as_of: date, data: SignalInput) -> Mapping[str, Decimal]:
+        _check_as_of(as_of, data)
+        if len(data.symbols) != 1:
+            raise SignalError(
+                "single_symbol_only",
+                "AbsoluteMomentumSignal supports exactly one symbol",
+            )
+        symbol = data.symbols[0]
+        history = tuple(o for o in data.observations(symbol) if o.session <= as_of)
+        required_closes = self._lookback_sessions + 1
+        if len(history) < required_closes:
+            return validate_signal_output({}, data)
+        base = history[-required_closes].indicator_close
+        current = history[-1].indicator_close
+        if base <= 0 or current <= 0:
+            return validate_signal_output({}, data)
+        trailing_return = current / base - 1.0
+        if not math.isfinite(trailing_return):
+            return validate_signal_output({}, data)
+        output = (
+            {symbol: self._active_weight}
+            if trailing_return > 0
+            else {symbol: Decimal("0")}
+        )
+        return validate_signal_output(output, data)
+
+
 _FIXED_DECIMAL_CONTEXT = decimal.Context(prec=50, rounding=decimal.ROUND_DOWN)
 
 
