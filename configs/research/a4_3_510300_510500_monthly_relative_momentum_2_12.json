@@ -1,0 +1,117 @@
+{
+  "benchmark": {
+    "active_rebalancing": false,
+    "cash_weight": "0.05",
+    "initial_targets": {
+      "510300": "0.475",
+      "510500": "0.475"
+    },
+    "type": "static_buy_and_hold"
+  },
+  "evaluation_period": {
+    "end": "2026-07-23",
+    "start": "2019-01-31"
+  },
+  "first_execution_session": "2019-02-01",
+  "first_signal_session": "2019-01-31",
+  "formal_run_controls": {
+    "formal_rerun": false,
+    "max_formal_runs": 1,
+    "parameter_rescue": false,
+    "parameter_sweep": false
+  },
+  "hypothesis": "A monthly long-only prior 2-12 relative-momentum rotation between 510300 and 510500 may improve risk-adjusted performance and maximum drawdown versus a static 47.5% / 47.5% Buy & Hold benchmark without sacrificing more than 30% of benchmark annualized return.",
+  "hypothesis_id": "A4_3_510300_510500_MONTHLY_RELATIVE_MOMENTUM_2_12",
+  "input_identities": {
+    "calendar_id": "fb24e5167d11fee3a58869f8de7910a0ea979d55d3481698bc5baf18cd508983",
+    "corporate_action_snapshot_ids": {
+      "510300": "b16ca276bf8d76637c47a1ae68c85a498f87fb17985262bb529338420903e370",
+      "510500": "da6d7b9bf0badb316dd1dd90323af74e1906416dcdc7d557dee42bb3d2d197f3"
+    },
+    "market_snapshot_ids": {
+      "510300": "904e594e09d5baad4e70c626129b88bef1a596b755a0731ca234d240b02a8071",
+      "510500": "fbcdeb600549cf8b8dc70b213a0afc9ed1af5b20f84612a67ca7f995c9a9fff2"
+    },
+    "universe_id": "bba6760fa738a829bb09a72f0c90919aeba02429018b8fd189c65e2d6c82a20e"
+  },
+  "insufficient_evidence_criteria": [
+    "incomplete_data",
+    "provenance_failure",
+    "formal_runner_failure",
+    "strategy_cannot_be_expressed_by_existing_execution_semantics"
+  ],
+  "invalid_handling": {
+    "invalid_monthly_endpoint": "whole strategy NO_DECISION",
+    "missing_one_symbol": "whole strategy NO_DECISION",
+    "non_finite_input": "SignalInput fails closed before producing a decision",
+    "non_finite_momentum": "whole strategy NO_DECISION",
+    "non_positive_close": "whole strategy NO_DECISION"
+  },
+  "pass_criteria": {
+    "strategy_annualized_return": ">= 0.70 * benchmark_annualized_return",
+    "strategy_gross_turnover": "<= 100.0",
+    "strategy_max_drawdown": "<= 0.80 * benchmark_max_drawdown",
+    "strategy_sharpe_zero_rate": ">= benchmark_sharpe_zero_rate + 0.10"
+  },
+  "primary_metrics": [
+    "annualized_return",
+    "sharpe_zero_rate",
+    "max_drawdown",
+    "gross_turnover"
+  ],
+  "reject_criteria": "any_core_threshold_failure",
+  "research_semantics": {
+    "benchmark": "initial 510300=0.475, 510500=0.475, cash=0.05 targets; no later active rebalancing",
+    "cash_target": "0.05",
+    "decision_schedule": "only the final official trading session of each natural month; all other sessions are NO_NEW_DECISION and preserve the previous effective target",
+    "missing_ranking_input": "if either eligible symbol lacks one required endpoint or has an invalid endpoint, emit whole-strategy NO_DECISION; never shrink the ranking universe",
+    "negative_momentum": "always hold the relative winner even when both momentum values are negative; no absolute filter",
+    "no_decision": "both symbols omitted so the existing Planner preserves the complete previous target state",
+    "numeric_convention": "float division on each existing causal indicator_close stream",
+    "price_series": "causal indicator_close available as of each official session close",
+    "ranking": "higher momentum wins; exact ties break by ascending symbol, so 510300 wins",
+    "return_definition": "at the final session of month t-1, indicator_close(end month t-2) / indicator_close(end month t-13) - 1.0",
+    "target": "winner Decimal('0.95'), loser Decimal('0'), cash Decimal('0.05')",
+    "window_semantics": "11 complete calendar-month cumulative return skipping the latest complete month, using verified official month-end sessions",
+    "warm_up": "first decision requires valid month-end endpoints for both symbols; mechanically fixed first signal is 2019-01-31 and next-session execution is 2019-02-01"
+  },
+  "secondary_metrics": [
+    "total_return",
+    "trade_count",
+    "annualized_gross_turnover"
+  ],
+  "strategy_parameters": {
+    "active_weight": "0.95",
+    "initial_cash_fen": 100000000,
+    "limits": {
+      "max_gross": "0.95",
+      "max_single_weight": "0.95",
+      "min_cash_ratio": "0.05"
+    },
+    "lookback_end_month": 12,
+    "lookback_start_month": 2,
+    "strategy": "monthly_relative_momentum_2_12",
+    "symbols": [
+      "510300",
+      "510500"
+    ]
+  },
+  "subject": "510300,510500",
+  "turnover_unit": {
+    "annualized_gross_turnover": "secondary diagnostic only",
+    "gross_turnover": "raw ratio",
+    "threshold_raw_ratio": 100.0,
+    "threshold_percent_equivalent": "10000%"
+  },
+  "universe": [
+    "510300",
+    "510500"
+  ],
+  "validity_criteria": {
+    "execution_consistency": "required",
+    "invalid_data_behavior": "none",
+    "preregistration_implementation_binding": "required",
+    "provenance": "required",
+    "static_benchmark_consistency": "required"
+  }
+}
