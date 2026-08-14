@@ -162,6 +162,33 @@ commit `0596352933b617adbb12df881f195fd59264c1a9` 与内容 SHA-256
 该 hypothesis 在 A4-1 止步；不改参、不重跑、不启动 A4-2。该结论仅是本次预注册的单标的
 全样本研究判定，不证明实盘可行性或收益保证。
 
+## A4-2 formal research closeout
+
+2026-08-14 在刷新后的 `origin/main`
+`dde769bde9f46210b8d75a1bfa39bf918eb828aa` 上独立完成 A4-2。预注册先以 commit
+`abeb48db12637d4eec1d2058ebfaaf9658b7938a` 冻结，内容 SHA-256 为
+`9863a433df141f08f8839fb818cc5da31b5d4d524efb01d708b4836844195b42`。所有工程验收通过后，
+唯一一次 fresh formal run 使用锁定的非 editable wheel，绑定 Git HEAD
+`56eff0ac5aee6d2db644150d6ec651e092b0a1ac`、tree
+`53a76b2b07ece07c62946cfb3b1bfb790409e973` 与 wheel SHA-256
+`f5fca956ac79ec63f59c91aab9256c3856f3a0f6821c088b7f9f8101e4fb7b3e`。
+
+- run ID：`4dbc0db47cdb3d1aa8ec399f0265c7abc31dd433137f4c0a3f610384ce18d532`；
+- artifact manifest SHA-256：`1d0f41009fb33aa45f777b6b887813c067534cc34691f98d53365a44aa74385d`；
+- `run.json` SHA-256：`4f36da149c29f80c3b64413434ebec4b808e1f420add71b5b0f7f49c5f987579`；
+- `metrics.json` SHA-256：`e1ee08ed629da5426f8f7c2cc5f6a2ac4ac2792b32c10b3d0715b30bacb33b2f`；
+- 策略：总收益 31.79%，年化收益 3.41%，最大回撤 23.59%，Sharpe 0.319，毛换手率
+  3,058.77%，35 笔成交；
+- benchmark：总收益 30.03%，年化收益 3.24%，最大回撤 38.49%，Sharpe 0.269；
+- 预注册判定：`REJECT`。年化收益、最大回撤和毛换手率门槛通过；Sharpe 相对 benchmark
+  仅提高 0.050，未达到预注册要求的 0.10，因此唯一失败项为 `sharpe_zero_rate`；
+- artifact manifest 的 8 个文件已逐一重算 SHA-256；信号状态为 1,071 个 ACTIVE、752 个
+  FLAT、252 个 NO_DECISION，符合 253 个收盘才产生首个决策的冻结语义。
+
+该 hypothesis 在 A4-2 止步。`FORMAL_RUN_COUNT=1`、`PARAMETER_RESCUE=FALSE`、
+`FORMAL_RERUN=FALSE`；Planner、Portfolio、accounting 与成交语义均未改变，且未启动 A4-3。
+该结论仅是本次预注册的单标的全样本研究判定，不证明实盘可行性或收益保证。
+
 ## 明确延后
 
 - 多标的策略研究与跨标的 benchmark；
