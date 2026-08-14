@@ -128,6 +128,7 @@ def _git(
     repository_root: Path,
     *arguments: str,
     binary: bool = False,
+    path_output: bool = False,
     missing_code: str = "historical_object_missing",
 ) -> str | bytes:
     try:
@@ -145,6 +146,8 @@ def _git(
     if binary:
         return completed.stdout
     try:
+        if path_output:
+            return os.fsdecode(completed.stdout).strip()
         return completed.stdout.decode("ascii").strip()
     except UnicodeDecodeError as exc:
         raise VersionedAuditError(missing_code) from exc
@@ -457,7 +460,7 @@ def resolve_v02_audit(
 ) -> V02TrustBindings:
     """Resolve all frozen v0.2 bindings from Git, never active files."""
     root = _safe_directory(repository_root, code="historical_object_missing")
-    top_level = _git(root, "rev-parse", "--show-toplevel")
+    top_level = _git(root, "rev-parse", "--show-toplevel", path_output=True)
     if not isinstance(top_level, str) or Path(top_level).resolve() != root:
         raise VersionedAuditError("historical_object_missing")
     target = _verify_git_history(root, profile)

@@ -26,6 +26,7 @@ from aquant.research.signals import (
     SignalObservation,
     SmaSignal,
     TopKMomentumSignal,
+    VolatilityRegimeDefenseSignal,
     validate_signal_output,
 )
 from aquant.rules import default_fee_policy
@@ -304,7 +305,93 @@ def test_sma_multi_symbol_input_fails_closed():
 
 
 # ---------------------------------------------------------------------------
-# C. Canonical baseline classification equivalence (public v01 fixture)
+# C. A4-1 volatility regime defense
+# ---------------------------------------------------------------------------
+
+
+def _volatility_signal(
+    *,
+    lookback_returns: int = 20,
+    annualization: int = 252,
+) -> VolatilityRegimeDefenseSignal:
+    return VolatilityRegimeDefenseSignal(
+        lookback_returns=lookback_returns,
+        annualization=annualization,
+        volatility_threshold=Decimal("0.25"),
+        active_weight=Decimal("0.95"),
+    )
+
+
+def test_volatility_defense_requires_twenty_returns_for_warm_up():
+    data = _input(*([10.0] * 20))
+    assert _volatility_signal().compute(data.as_of, data) == {}
+
+
+def test_volatility_defense_low_volatility_is_active():
+    data = _input(*([10.0] * 21))
+    assert _volatility_signal().compute(data.as_of, data) == {
+        _SYMBOL: Decimal("0.95")
+    }
+
+
+def test_volatility_defense_high_volatility_is_flat():
+    data = _input(10.0, 20.0, 10.0)
+    assert _volatility_signal(lookback_returns=2, annualization=1).compute(
+        data.as_of,
+        data,
+    ) == {_SYMBOL: Decimal("0")}
+
+
+def test_volatility_defense_threshold_equality_is_active(monkeypatch):
+    monkeypatch.setattr(
+        "aquant.research.signals.sample_standard_deviation",
+        lambda _returns: 0.25,
+    )
+    data = _input(10.0, 11.0, 12.0)
+    assert _volatility_signal(lookback_returns=2, annualization=1).compute(
+        data.as_of,
+        data,
+    ) == {_SYMBOL: Decimal("0.95")}
+
+
+def test_volatility_defense_invalid_history_fails_closed():
+    data = _input(10.0, 0.0, 10.0)
+    assert _volatility_signal(lookback_returns=2, annualization=1).compute(
+        data.as_of,
+        data,
+    ) == {}
+    with pytest.raises(SignalError) as exc:
+        _input(10.0, float("nan"), 10.0)
+    assert exc.value.code == "invalid_indicator_close"
+
+
+def test_volatility_defense_is_deterministic():
+    data = _input(*([10.0] * 21))
+    signal = _volatility_signal()
+    assert signal.compute(data.as_of, data) == signal.compute(data.as_of, data)
+
+
+def test_volatility_defense_rejects_invalid_parameters():
+    valid = {
+        "lookback_returns": 20,
+        "annualization": 252,
+        "volatility_threshold": Decimal("0.25"),
+        "active_weight": Decimal("0.95"),
+    }
+    for field, value, code in (
+        ("lookback_returns", 1, "invalid_lookback"),
+        ("annualization", 0, "invalid_annualization"),
+        ("volatility_threshold", Decimal("0"), "invalid_volatility_threshold"),
+        ("active_weight", Decimal("0"), "invalid_active_weight"),
+    ):
+        arguments = {**valid, field: value}
+        with pytest.raises(SignalError) as exc:
+            VolatilityRegimeDefenseSignal(**arguments)
+        assert exc.value.code == code
+
+
+# ---------------------------------------------------------------------------
+# D. Canonical baseline classification equivalence (public v01 fixture)
 # ---------------------------------------------------------------------------
 
 
@@ -507,7 +594,7 @@ def test_sma_order_position_compatibility_with_baseline(baseline_runs):
 
 
 # ---------------------------------------------------------------------------
-# D. Top-K momentum contract demonstration
+# E. Top-K momentum contract demonstration
 # ---------------------------------------------------------------------------
 
 
@@ -624,16 +711,20 @@ def test_top_k_deterministic_under_changed_caller_decimal_context():
 
 
 # ---------------------------------------------------------------------------
-# E. Interface and registry
+# F. Interface and registry
 # ---------------------------------------------------------------------------
 
 
 def test_signal_classes_satisfy_explicit_protocol():
     assert isinstance(SmaSignal(period=2), Signal)
     assert isinstance(TopKMomentumSignal(lookback=1, k=1), Signal)
+    assert isinstance(_volatility_signal(), Signal)
 
 
 def test_explicit_registry_maps_names_to_constructors():
-    assert set(SIGNAL_REGISTRY) == {"sma", "top_k_momentum"}
+    assert set(SIGNAL_REGISTRY) == {
+        "sma",
+        "top_k_momentum",
+    }
     assert SIGNAL_REGISTRY["sma"] is SmaSignal
     assert SIGNAL_REGISTRY["top_k_momentum"] is TopKMomentumSignal
