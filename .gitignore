@@ -9,6 +9,7 @@ data/raw/
 data/manifests/
 data/calendars/
 outputs/backtests/
+outputs/research_loop/
 build/
 env/
 .env

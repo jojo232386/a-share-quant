@@ -71,6 +71,8 @@
 | R-012 | 无券商连接、自动下单与持续监控；不得表述为已完成实盘验证 | P1 | Paper Trading / Live Readiness（未授权） | 实盘接入 | 明确授权 + 独立任务书 + 资金安全门禁 | Deferred（在获得授权前不进入范围） |
 | R-013 | GitHub Dependabot 告警未分诊（push 时由远端报告，本任务未调查） | 待定 | 依赖与供应链分诊（独立任务） | 待分诊后确定 | 分诊记录：受影响依赖、是否进入运行路径、升级或豁免决定及理由 | Deferred（仅登记为分诊候选；本任务不调查、不修复） |
 | R-014 | 冻结基线中 79 个 Python 文件未满足 Ruff format；把全仓 format 直接作为 A2 门禁会与保护范围冲突 | P2 | Repository hygiene / 独立格式规范化任务 | 未来正式启用 repository-wide format CI 或验收门禁之前；不阻断 A2 closeout | 单独授权的纯格式 diff；确认不改变运行语义；全仓 `ruff format --check .`、lint、测试与 build 全部通过；保护范围经过独立复核 | Deferred（不属于 A2 blocker；基线与交集证据见 A2 implementation plan 的 FORMAT GATE AMENDMENT） |
+| R-015 | Research Loop v1 为保持冻结 A2 的 T 收盘→T+1 开盘契约，将同日应付分红现金放在开盘再平衡后入账 | P1 | Gate F / 执行与结算口径有效性 | 任何宣称策略收益对分红现金可用时点稳健的结论 | 分红在开盘前/后可用的对照或敏感性报告；实际券商结算证据留到 Paper Trading / Live Readiness | Deferred（Research Loop P0 采用更保守的后入账口径；Blocker (armed) at 相关 Gate F 结论） |
+| R-016 | 冻结滚动账本的每日完整重放校验使 2,000+日双路径 Research Loop 耗时达分钟级 | P2 | Research Loop 性能优化 | 不阻断 P0 单标的可重现研究；在多标的或大规模参数试验前 | 不绕过终态完整重放的性能基准与等价增量校验方案；同一输入的结果与帐本结构完全相同 | Deferred（P1 工程优化；不为 P0 改冻结契约） |
 
 ### 3.1 R-007 A2 closure evidence
 
@@ -119,6 +121,20 @@ shared-cash orchestration）与 `c9516f8`（多标的 gross 聚合证据），�
 该关闭仅证明 **A2 工程层的 Planner → shared-cash 组合语义风险** 已具备验收证据；不证明
 alpha、回测稳健性、数据有效性、Gate F、paper trading 或 live readiness。20 个历史基准仍是
 独立单标的账户，其净值仍不可相加，也不会因本次 A2 关闭而被追溯解释为共享现金组合。
+
+### 3.2 Research Loop v1 P0 evidence
+
+2026-08-14 的 P0 验收使用 510300 真实行情快照
+`904e594e09d5baad4e70c626129b88bef1a596b755a0731ca234d240b02a8071`、公司行动快照
+`b16ca276bf8d76637c47a1ae68c85a498f87fb17985262bb529338420903e370` 与交易日历
+`fb24e5167d11fee3a58869f8de7910a0ea979d55d3481698bc5baf18cd508983`。确定性运行 ID 为
+`e81d80da3b0de44fd1777b2c6eca558294e0907988f8e5f5982f60f71317cea8`；完整口径和结果见
+`docs/research_loop_v1.md`。
+
+该证据证明 Data → Signal → Planner → Portfolio → Metrics → Report 在真实快照上可运行、
+可重复且可审计；结果为 SMA(20) 费后总收益 -10.83%，buy-and-hold benchmark 30.03%，
+因此未达到继续验证门槛。它不关闭 R-001、R-002、R-003、R-006a、R-008 或 R-015，
+不得被外推为 Alpha、稳健性、多标的有效性、paper trading 或 live readiness 证据。
 
 ## 4. 维护规则
 

@@ -57,5 +57,6 @@ uv build
 - [支持矩阵](docs/support_matrix.md)
 - [A 股执行规则](docs/a_share_execution_rules.md)
 - [数据质量验收](docs/data_quality_acceptance.md)
+- [Research Loop v1](docs/research_loop_v1.md)
 - [已知限制](docs/known_limitations.md)
 - [风险治理与 Blocker/Deferred 登记册](docs/engineering/risk_governance.md)
