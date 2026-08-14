@@ -122,6 +122,28 @@ SMA(20) 在费后总收益 -10.83%、年化 -1.38%、最大回撤 32.76%、Sharp
 
 上述 SMA(20) 结果产生于本次预注册约束之前；本次加固不重跑、不调参，也不改变其 `insufficient_preliminary_evidence` 结论。
 
+## A4-1 formal research closeout
+
+2026-08-14 在所有工程验收通过后，使用锁定的非 editable wheel 完成了唯一一次
+fresh formal run。正式运行绑定 Git HEAD
+`88220efd9f35ef5a0552b5949919072fb4cf1585`、tree
+`9ea88056652418d654315cf2ea6927ee2e22bdfe` 与 wheel SHA-256
+`4dd25d8ccf8ac5828120be049e9906df560fdeb72974b2ba3e2b605780216fb7`。预注册绑定
+commit `0596352933b617adbb12df881f195fd59264c1a9` 与内容 SHA-256
+`89ec8ede2c4b0cbb1cdb505cfce396601bbb41d596d12e824288c6fac86ad6da`。
+
+- run ID：`a34ff2f0420b0e405089f19bb41a137c977ef1af0366902f45656223d600afc0`；
+- artifact manifest SHA-256：`600dadfd82c1972afe326761fadd469a6996896ffd98bf9a46ae834dc98ed3f8`；
+- `run.json` SHA-256：`efdea7088db7e2e6360670fe114ffd927089ce159499664d45e3a82210bd893e`；
+- `metrics.json` SHA-256：`c94df9b3492138ccb01c59e4099d8bcd5c04fceaa6babe3eece0039d4f96e37d`；
+- 策略：总收益 11.87%，年化收益 1.37%，最大回撤 40.42%，Sharpe 0.166，毛换手率
+  4,124.57%，46 笔成交；
+- benchmark：总收益 30.03%，年化收益 3.24%，最大回撤 38.49%，Sharpe 0.269；
+- 预注册判定：`REJECT`。年化收益、Sharpe 和最大回撤门槛失败，毛换手率门槛通过。
+
+该 hypothesis 在 A4-1 止步；不改参、不重跑、不启动 A4-2。该结论仅是本次预注册的单标的
+全样本研究判定，不证明实盘可行性或收益保证。
+
 ## 明确延后
 
 - 多标的策略研究与跨标的 benchmark；
