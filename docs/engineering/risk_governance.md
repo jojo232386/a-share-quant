@@ -63,13 +63,62 @@
 | R-005 | 日线 OHLC 无法证明开盘瞬间盘口、排队与可成交量 | P2 | Paper Trading / Live Readiness（验证）；文档假设由当前阶段维护 | 不阻断 Gate F | 保守成交假设的显式文档；证据不足时 fail-closed 的路径测试；后续纸面交易中对这些假设的实测校验。**这是日线数据分辨率的固有限制，不是必须“解决”的缺陷**，验收目标是假设可审计而非消除限制 | Deferred |
 | R-006a | Gate F 层执行真实性：交易成本、滑点、以及证据允许范围内的流动性/容量假设未做压力测试 | P1 | Gate F / 研究有效性验证 | Gate F 中任何声称收益或稳健性的结论 | 交易成本压力测试与滑点压力测试（含参数区间与结论敏感性）；在证据允许处给出合理的流动性与容量假设及其上限说明 | Deferred（A2 期间可保持；Blocker (armed) at Gate F） |
 | R-006b | 券商级执行真实性：部分成交、盘口冲击、通道延迟、券商结算行为未建模 | P1 | Paper Trading / Live Readiness | 实盘接入 | 部分成交与盘口效应建模或实测；通道延迟测量；券商结算行为对账 | Deferred（**明确不属于 Gate F**；Gate F 不得为此建设生产级撮合模拟器） |
-| R-007 | 共享现金 / 多标的组合语义：20 个基准是独立单标的账户，净值不可相加 | P1 | A2 / Planner / Portfolio | 任何把多标的组合结果作为有效研究证据使用的时点 | NO_DECISION 结转后的有效敞口口径；共享现金约束；总敞口上限；确定性组合状态测试（同输入同状态） | Blocker (armed) at A2 组合结果使用点；A2 工程实现本身可继续推进 |
+| R-007 | 共享现金 / 多标的组合语义：20 个基准是独立单标的账户，净值不可相加 | P1 | A2 / Planner / Portfolio | 任何把多标的组合结果作为有效研究证据使用的时点 | NO_DECISION 结转后的有效敞口口径；共享现金约束；总敞口上限；确定性组合状态测试（同输入同状态） | Closed（证据见 §3.1） |
 | R-008 | SMA 候选仅验证流程；局部正收益不得解释为已验证 Alpha | P1 | 研究结论表述（持续） | 任何对外结论 | 所有报告显式标注结论边界；发布检查阻止越界表述 | Deferred（表述纪律持续生效） |
 | R-009 | 内部一致性校验（提交、标签、SHA-256）不是第三方签名 | P2 | 供应链完整性阶段 | 不阻断 Gate F | 签名标签或外部时间戳证明 | Deferred |
 | R-010 | 首次依赖安装可能访问包索引；仅安装后的重算承诺离线 | P3 | 环境固化阶段 | 不阻断 | 离线安装路径验证记录 | Deferred |
 | R-011 | 固定审计对象（trust anchor / audit commit / audit tag）若被移动或重建，审计链不可恢复 | P0 | 持续（每次治理变更） | 立即 | 每次治理变更后重新核验 `HANDOFF.md` 中的哈希与标签指向 | Blocker (active on trigger)（一旦发生漂移即阻断） |
 | R-012 | 无券商连接、自动下单与持续监控；不得表述为已完成实盘验证 | P1 | Paper Trading / Live Readiness（未授权） | 实盘接入 | 明确授权 + 独立任务书 + 资金安全门禁 | Deferred（在获得授权前不进入范围） |
 | R-013 | GitHub Dependabot 告警未分诊（push 时由远端报告，本任务未调查） | 待定 | 依赖与供应链分诊（独立任务） | 待分诊后确定 | 分诊记录：受影响依赖、是否进入运行路径、升级或豁免决定及理由 | Deferred（仅登记为分诊候选；本任务不调查、不修复） |
+| R-014 | 冻结基线中 79 个 Python 文件未满足 Ruff format；把全仓 format 直接作为 A2 门禁会与保护范围冲突 | P2 | Repository hygiene / 独立格式规范化任务 | 未来正式启用 repository-wide format CI 或验收门禁之前；不阻断 A2 closeout | 单独授权的纯格式 diff；确认不改变运行语义；全仓 `ruff format --check .`、lint、测试与 build 全部通过；保护范围经过独立复核 | Deferred（不属于 A2 blocker；基线与交集证据见 A2 implementation plan 的 FORMAT GATE AMENDMENT） |
+
+### 3.1 R-007 A2 closure evidence
+
+本关闭证据绑定本地提交 `33efc27`（rolling SELL accounting）、`626a774`（Planner → rolling
+shared-cash orchestration）与 `c9516f8`（多标的 gross 聚合证据），并逐项映射到以下测试：
+
+1. **NO_DECISION / carry-forward 有效状态直接消费**：
+   `tests/unit/test_rolling_orchestration.py::test_rebalance_consumes_complete_effective_planner_state_without_second_carry_forward`
+   证明 A2 直接消费 Planner 已完成结转的完整 `PlannedTargets`，不维护第二套 carry-forward。
+2. **真实共享现金**：
+   `tests/unit/test_rolling_orchestration.py::test_all_sells_run_before_all_buys_and_each_side_is_symbol_sorted`、
+   `tests/unit/test_rolling_orchestration.py::test_sell_proceeds_are_available_to_later_buy_in_one_shared_cash_account`
+   与
+   `tests/unit/test_rolling_orchestration.py::test_buy_affordability_decrements_exactly_100_shares_including_fees`
+   分别覆盖 SELL-before-BUY、卖出所得进入同一现金账户供后续 BUY 使用，以及含费用可负担性按 100 股递减。
+3. **同 T 权益分母与总敞口**：
+   `tests/unit/test_rolling_orchestration.py::test_rebalance_uses_T_close_equity_including_receivable` 与
+   `tests/unit/test_rolling_orchestration.py::test_total_target_notional_uses_same_equity_and_respects_max_gross`、
+   `tests/unit/test_rolling_orchestration.py::test_total_target_notional_aggregates_across_symbols_for_max_gross`
+   覆盖同一 T 收盘权益分母（含 receivable）、单标的边界，以及每只分别低于上限但多标的合计超过
+   `max_gross` 时的原子 fail-closed。
+4. **确定性输入顺序 / hash seed**：
+   `tests/unit/test_rolling_orchestration.py::test_reversed_execution_inputs_produce_structurally_identical_result`
+   覆盖反转输入仍产生结构相同且稳定排序的结果；同一测试分别在 `PYTHONHASHSEED=11` 与
+   `PYTHONHASHSEED=97` 下验证。
+
+补充边界证据：
+
+- 显式零与缺失 key 不等价：
+  `tests/unit/test_rolling_orchestration.py::test_explicit_zero_no_bar_keeps_desired_realized_and_residual_visible`
+  保留显式 FLAT，
+  `tests/unit/test_rolling_orchestration.py::test_held_symbol_missing_from_effective_plan_fails_atomically`
+  对缺失持仓 key 原子 fail-closed。
+- desired / realized residual 只通过合法执行失败重试：
+  `tests/unit/test_rolling_orchestration.py::test_explicit_zero_no_bar_keeps_desired_realized_and_residual_visible`、
+  `tests/unit/test_rolling_orchestration.py::test_explicit_zero_price_limit_keeps_residual_visible`、
+  `tests/unit/test_rolling_orchestration.py::test_later_effective_zero_plan_and_legal_session_recomputes_and_converges`
+  与
+  `tests/unit/test_rolling_orchestration.py::test_residual_does_not_create_a_shadow_target_or_mark_failure_achieved`
+  覆盖 no-bar / price-limit 后保留差额、后续合法交易日重算收敛，且 residual 不成为影子目标。
+- T+1 继续复用独立规则原语：
+  `tests/unit/test_a_share_rules.py::test_t_plus_one_uses_calendar_and_does_not_wait_for_symbol_bar`；
+  `tests/unit/test_rolling_orchestration.py::test_rebalance_rejects_lot_without_official_t_plus_one_binding_atomically`
+  对伪造或无法绑定到官方日历的 availability 原子 fail-closed。
+
+该关闭仅证明 **A2 工程层的 Planner → shared-cash 组合语义风险** 已具备验收证据；不证明
+alpha、回测稳健性、数据有效性、Gate F、paper trading 或 live readiness。20 个历史基准仍是
+独立单标的账户，其净值仍不可相加，也不会因本次 A2 关闭而被追溯解释为共享现金组合。
 
 ## 4. 维护规则
 
