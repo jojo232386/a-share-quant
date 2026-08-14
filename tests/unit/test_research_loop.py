@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -35,6 +36,75 @@ SESSIONS = tuple(
     if (session := date(2026, 7, 1) + timedelta(days=offset)).weekday() < 5
 )[:9]
 MARKET_SESSIONS = SESSIONS[:8]
+GIT_HEAD = "a" * 40
+PREREGISTRATION_COMMIT = "b" * 40
+
+
+def _config():
+    return ResearchLoopConfig(
+        symbol=SYMBOL,
+        initial_cash_fen=10_000_000,
+        sma_period=2,
+        active_weight=Decimal("0.95"),
+        limits=PlannerLimits(
+            max_single_weight=Decimal("0.95"),
+            max_gross=Decimal("0.95"),
+            min_cash_ratio=Decimal("0.05"),
+        ),
+    )
+
+
+def _preregistration_content() -> bytes:
+    values = {
+        "benchmark": "buy_and_hold",
+        "evaluation_period": {
+            "start": MARKET_SESSIONS[0].isoformat(),
+            "end": MARKET_SESSIONS[-1].isoformat(),
+        },
+        "hypothesis": "SMA signal outperforms buy and hold on the preregistered criteria.",
+        "pass_criteria": {
+            "strategy_max_drawdown": "<= benchmark_max_drawdown",
+            "strategy_sharpe_zero_rate": "> benchmark_sharpe_zero_rate",
+            "strategy_total_return": "> benchmark_total_return",
+        },
+        "primary_metrics": ["total_return", "sharpe_zero_rate", "max_drawdown"],
+        "reject_criteria": "otherwise",
+        "strategy_parameters": {
+            "active_weight": "0.95",
+            "initial_cash_fen": 10_000_000,
+            "limits": {
+                "max_gross": "0.95",
+                "max_single_weight": "0.95",
+                "min_cash_ratio": "0.05",
+            },
+            "sma_period": 2,
+            "symbol": SYMBOL,
+        },
+        "universe": [SYMBOL],
+    }
+    return (json.dumps(values, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def _commit_preregistration(root) -> tuple[str, str]:
+    preregistration = root / "configs" / "research" / "hypothesis.json"
+    preregistration.parent.mkdir(parents=True)
+    preregistration.write_bytes(_preregistration_content())
+    (root / ".gitignore").write_text("/configs/universes/\n/data/\n/outputs/\n")
+    subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+    subprocess.run(("git", "config", "user.name", "Research Test"), cwd=root, check=True)
+    subprocess.run(
+        ("git", "config", "user.email", "research-test@example.invalid"),
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(
+        ("git", "add", ".gitignore", "configs/research/hypothesis.json"),
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(("git", "commit", "-qm", "preregister hypothesis"), cwd=root, check=True)
+    head = subprocess.check_output(("git", "rev-parse", "HEAD"), cwd=root, text=True).strip()
+    return "configs/research/hypothesis.json", head
 
 
 def _fixture(root, *, opens=None):
@@ -157,17 +227,10 @@ def _fixture(root, *, opens=None):
 def _run(root):
     records = _fixture(root)
     result = run_research_loop(
-        config=ResearchLoopConfig(
-            symbol=SYMBOL,
-            initial_cash_fen=10_000_000,
-            sma_period=2,
-            active_weight=Decimal("0.95"),
-            limits=PlannerLimits(
-                max_single_weight=Decimal("0.95"),
-                max_gross=Decimal("0.95"),
-                min_cash_ratio=Decimal("0.05"),
-            ),
-        ),
+        git_head=GIT_HEAD,
+        preregistration_commit=PREREGISTRATION_COMMIT,
+        preregistration_content=_preregistration_content(),
+        config=_config(),
         market_data=records[3],
         corporate_actions=records[4],
         calendar=records[5],
@@ -218,17 +281,10 @@ def test_unchanged_target_retries_after_price_limit_rejection(tmp_path):
         opens=(10.0, 10.5, 12.0, 10.4, 9.8, 10.3, 10.8, 10.1),
     )
     result = run_research_loop(
-        config=ResearchLoopConfig(
-            symbol=SYMBOL,
-            initial_cash_fen=10_000_000,
-            sma_period=2,
-            active_weight=Decimal("0.95"),
-            limits=PlannerLimits(
-                max_single_weight=Decimal("0.95"),
-                max_gross=Decimal("0.95"),
-                min_cash_ratio=Decimal("0.05"),
-            ),
-        ),
+        git_head=GIT_HEAD,
+        preregistration_commit=PREREGISTRATION_COMMIT,
+        preregistration_content=_preregistration_content(),
+        config=_config(),
         market_data=records[3],
         corporate_actions=records[4],
         calendar=records[5],
@@ -243,6 +299,7 @@ def test_unchanged_target_retries_after_price_limit_rejection(tmp_path):
 
 def test_research_loop_cli_selects_exact_verified_inputs(tmp_path, capsys):
     records = _fixture(tmp_path)
+    preregistration, actual_head = _commit_preregistration(tmp_path)
 
     exit_code = main(
         [
@@ -259,6 +316,8 @@ def test_research_loop_cli_selects_exact_verified_inputs(tmp_path, capsys):
             records[0].snapshot_id,
             "--corporate-action-snapshot-id",
             records[1].snapshot_id,
+            "--preregistration",
+            preregistration,
             "--symbol",
             SYMBOL,
             "--sma-period",
@@ -271,4 +330,50 @@ def test_research_loop_cli_selects_exact_verified_inputs(tmp_path, capsys):
     response = json.loads(capsys.readouterr().out)
     assert exit_code == 0
     assert response["status"] == "ok"
-    assert (tmp_path / response["research_directory"] / "metrics.json").is_file()
+    directory = tmp_path / response["research_directory"]
+    assert (directory / "metrics.json").is_file()
+    run = json.loads((directory / "run.json").read_text())
+    assert len(run["git_head"]) == 40
+    assert run["git_head"] == actual_head
+    assert run["preregistration_identity"] == {
+        "commit": actual_head,
+        "content_sha256": hashlib.sha256(_preregistration_content()).hexdigest(),
+    }
+
+
+def test_formal_research_rejects_modified_preregistration_before_artifact(tmp_path, capsys):
+    records = _fixture(tmp_path)
+    preregistration, _ = _commit_preregistration(tmp_path)
+    (tmp_path / preregistration).write_bytes(_preregistration_content() + b"\n")
+
+    exit_code = main(
+        [
+            "research-loop",
+            "--project-root",
+            str(tmp_path),
+            "--data-root",
+            str(tmp_path),
+            "--universe-id",
+            records[6].universe_id,
+            "--calendar-id",
+            records[2].calendar_id,
+            "--snapshot-id",
+            records[0].snapshot_id,
+            "--corporate-action-snapshot-id",
+            records[1].snapshot_id,
+            "--preregistration",
+            preregistration,
+            "--symbol",
+            SYMBOL,
+            "--sma-period",
+            "2",
+            "--initial-cash-yuan",
+            "100000.00",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert json.loads(captured.err)["error_code"] == "repository_not_clean"
+    assert not (tmp_path / "outputs" / "research_loop").exists()
