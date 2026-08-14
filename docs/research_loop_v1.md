@@ -1,6 +1,7 @@
 # Research Loop v1
 
-Research Loop v1 是单标的、日线、真实快照驱动的最小研究闭环：
+Research Loop v1 是日线、真实快照驱动的最小研究闭环；原路径保持单标的，A4-3
+仅增加冻结的 510300 / 510500 双标的 research-layer 路径：
 
 ```text
 Verified Market Snapshot
@@ -22,7 +23,10 @@ Verified Market Snapshot
 - 成交复用现有 A 股规则：T+1、100 股整手、涨跌停、共享现金、日期有效费用。
 - 现金分红在除权日登记应收；为保持 A2 的 T 收盘到 T+1 开盘契约完整，同日到账现金在开盘再平衡后入账，不能资助该次开盘买入。
 - 若日历在行情末日后无下一交易日，行情末日作为 T+1 结算缓冲，不进入绩效区间。
-- Benchmark 在首个收盘生成一次同权重买入目标，下一交易日开盘成交后持有，不再平衡。
+- 单标的 Benchmark 在首个收盘生成一次买入目标，下一交易日开盘成交后持有。
+- A4-3 Benchmark 在 `2019-01-31` 生成 510300=47.5%、510500=47.5%、现金=5%
+  的唯一初始目标，`2019-02-01` 开盘执行；之后不主动再平衡，真实权重只因整手、费用、
+  价格、分红与成交约束自然漂移。
 
 ## 命令行
 
@@ -39,7 +43,7 @@ macOS `UF_HIDDEN` 文件标志，CPython 3.11.15 的 `site.py` 因该标志跳�
 并可正常导入。现有证据不能确认是谁在原环境创建后追加了该标志，因此 formal runtime
 不修改或依赖 `.pth`，而是使用隔离的非 editable wheel 安装。
 
-正式运行还必须通过 `--preregistration` 指向仓库内的 JSON 研究预注册文件。该文件必须在运行前已提交，且工作树必须干净；程序会自动绑定完整 Git HEAD、该文件最后修改的 commit 和内容 SHA-256。预注册必须绑定与策略匹配的指标、判断门槛、参数和真实输入身份。原 SMA 路径保留原有预注册口径；A4-1 与 A4-2 分别冻结自己的策略语义，并共用已预先固定的年化收益、Sharpe、最大回撤和毛换手率门槛。
+正式运行还必须通过 `--preregistration` 指向仓库内的 JSON 研究预注册文件。该文件必须在运行前已提交，且工作树必须干净；程序会自动绑定完整 Git HEAD、该文件最后修改的 commit 和内容 SHA-256。预注册必须绑定与策略匹配的指标、判断门槛、参数和真实输入身份。原 SMA 路径保留原有预注册口径；A4-1、A4-2 与 A4-3 分别冻结自己的策略语义，并共用已预先固定的年化收益、Sharpe、最大回撤和毛换手率门槛。A4-3 还逐标的绑定两组行情和公司行动快照，并冻结首个信号/执行日、静态 benchmark、换手单位及只运行一次的控制字段。
 
 - `hypothesis`；
 - 与当次单标的运行一致的 `universe` 和 `evaluation_period`；
@@ -48,7 +52,9 @@ macOS `UF_HIDDEN` 文件标志，CPython 3.11.15 的 `site.py` 因该标志跳�
 - 与现有 assessment 规则一致的 `pass_criteria` 和 `reject_criteria`；
 - 与当次 CLI 实际配置一致的 `strategy_parameters`。
 
-任一内容不匹配、未提交或运行前被修改，都会在产生正式 result artifact 前失败。A4-1 与 A4-2 还会核对行情、公司行动、交易日历和 universe 的四个精确 ID。
+任一内容不匹配、未提交或运行前被修改，都会在产生正式 result artifact 前失败。A4-1
+与 A4-2 会核对行情、公司行动、交易日历和 universe 的四个精确 ID；A4-3 会核对两只
+ETF 的全部六个输入 ID（两组行情、两组公司行动、日历和 universe）。
 
 ```bash
 ./scripts/formal_research_runtime.sh run -- research-loop \
@@ -103,6 +109,35 @@ A4-2 同样只增加一个 research-layer Signal 实现。其参数固定为 252
   --active-weight 0.95
 ```
 
+A4-3 是冻结的最小双标的 research-layer 扩展，不进入 `SIGNAL_REGISTRY`，也不改变
+Planner、Portfolio、accounting、费用或成交规则。只在每个自然月最后一个官方交易日计算
+510300 与 510500 的 prior 2-12 相对动量：在月 `t-1` 月末使用
+`indicator_close(end t-2) / indicator_close(end t-13) - 1`。较高者目标 95%，另一只显式为
+0，现金目标 5%；并列时按代码升序由 510300 获胜，两者均为负时仍持有相对领先者。
+非月末为 `NO_NEW_DECISION`，任一标的排名端点缺失或无效时整组 `NO_DECISION`，不得缩小
+universe。verified calendar 与两组快照机械固定首个信号日为 `2019-01-31`，次一官方交易日
+`2019-02-01` 执行。
+
+```bash
+./scripts/formal_research_runtime.sh run -- research-loop \
+  --project-root . \
+  --data-root /path/to/a-share-quant-data \
+  --universe-id bba6760fa738a829bb09a72f0c90919aeba02429018b8fd189c65e2d6c82a20e \
+  --calendar-id fb24e5167d11fee3a58869f8de7910a0ea979d55d3481698bc5baf18cd508983 \
+  --snapshot-id 904e594e09d5baad4e70c626129b88bef1a596b755a0731ca234d240b02a8071 \
+  --corporate-action-snapshot-id b16ca276bf8d76637c47a1ae68c85a498f87fb17985262bb529338420903e370 \
+  --secondary-snapshot-id fbcdeb600549cf8b8dc70b213a0afc9ed1af5b20f84612a67ca7f995c9a9fff2 \
+  --secondary-corporate-action-snapshot-id da6d7b9bf0badb316dd1dd90323af74e1906416dcdc7d557dee42bb3d2d197f3 \
+  --preregistration configs/research/a4_3_510300_510500_monthly_relative_momentum_2_12.json \
+  --symbol 510300 \
+  --secondary-symbol 510500 \
+  --strategy monthly_relative_momentum_2_12 \
+  --lookback-start-month 2 \
+  --lookback-end-month 12 \
+  --initial-cash-yuan 1000000.00 \
+  --active-weight 0.95
+```
+
 只验证正式 wheel、非 editable 安装和官方 CLI 启动，不进入数据、策略或指标阶段：
 
 ```bash
@@ -122,7 +157,9 @@ A4-2 同样只增加一个 research-layer Signal 实现。其参数固定为 252
 - `report.md`：人可读研究结论；
 - `artifact_manifest.json`：所有输出文件的 SHA-256 清单。
 
-指标固定使用 252 个年化交易日、无风险利率 0；换手率为成交名义金额绝对值之和除以平均每日权益。
+指标固定使用 252 个年化交易日、无风险利率 0；换手率为成交名义金额绝对值之和除以平均
+每日权益。正式门槛 `strategy_gross_turnover <= 100.0` 中的 `100.0` 是 raw ratio，等价
+10,000%；`annualized_gross_turnover` 仅为 secondary diagnostic，不参与 PASS/REJECT。
 
 ## 真实数据 P0 证据
 

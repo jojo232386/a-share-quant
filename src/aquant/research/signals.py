@@ -12,6 +12,7 @@ Public surface:
 - :class:`SmaSignal` -- SMA classification compatible with the audited
   ``SmaStrategy`` baseline decision semantics
 - :class:`TopKMomentumSignal` -- multi-symbol contract demonstration only
+- :class:`MonthlyRelativeMomentumSignal` -- frozen A4-3 two-ETF research signal
 - :func:`validate_signal_output` -- centralized fail-closed output validation
 - :data:`SIGNAL_REGISTRY` -- tiny explicit name -> constructor registry
 
@@ -449,6 +450,114 @@ class AbsoluteMomentumSignal:
             else {symbol: Decimal("0")}
         )
         return validate_signal_output(output, data)
+
+
+class MonthlyRelativeMomentumSignal:
+    """Frozen A4-3 monthly prior 2-12 relative-momentum decision.
+
+    The signal is deliberately specific to ``510300`` and ``510500``.  It
+    evaluates only verified natural-month-end sessions.  At the final session
+    of month ``t-1`` it compares each symbol's causal indicator close at the
+    end of month ``t-2`` with the close at the end of month ``t-13``.  This is
+    an eleven-month cumulative return that skips the latest complete month.
+
+    A missing or invalid endpoint for either symbol omits both symbols, so the
+    Planner preserves the complete previous target.  A valid decision always
+    emits both targets: ``0.95`` for the relative winner and explicit zero for
+    the loser.  Equal values use ascending symbol as the deterministic tie
+    break, and negative values do not activate an absolute-momentum filter.
+    """
+
+    _SYMBOLS = ("510300", "510500")
+    _ACTIVE_WEIGHT = Decimal("0.95")
+    _DENOMINATOR_MONTH_OFFSET = 12
+    _NUMERATOR_MONTH_OFFSET = 1
+
+    def __init__(self, *, month_end_sessions: Sequence[date]) -> None:
+        if isinstance(month_end_sessions, (str, bytes)) or not isinstance(
+            month_end_sessions, Sequence
+        ):
+            raise SignalError(
+                "invalid_month_end_sessions",
+                "month_end_sessions must be a chronological date sequence",
+            )
+        normalized = tuple(month_end_sessions)
+        if (
+            not normalized
+            or any(type(session) is not date for session in normalized)
+            or any(
+                left >= right
+                for left, right in zip(normalized, normalized[1:], strict=False)
+            )
+            or len({(session.year, session.month) for session in normalized})
+            != len(normalized)
+        ):
+            raise SignalError(
+                "invalid_month_end_sessions",
+                "month_end_sessions must contain one strictly ascending date per month",
+            )
+        self._month_end_sessions = normalized
+        self._month_end_positions = {
+            session: position for position, session in enumerate(normalized)
+        }
+
+    @property
+    def month_end_sessions(self) -> tuple[date, ...]:
+        return self._month_end_sessions
+
+    @property
+    def symbols(self) -> tuple[str, str]:
+        return self._SYMBOLS
+
+    @property
+    def active_weight(self) -> Decimal:
+        return self._ACTIVE_WEIGHT
+
+    def compute(self, as_of: date, data: SignalInput) -> Mapping[str, Decimal]:
+        _check_as_of(as_of, data)
+        if tuple(sorted(data.symbols)) != self._SYMBOLS:
+            raise SignalError(
+                "eligible_universe_mismatch",
+                "A4-3 requires exactly 510300 and 510500",
+            )
+        position = self._month_end_positions.get(as_of)
+        if position is None:
+            return validate_signal_output({}, data)
+        if position < self._DENOMINATOR_MONTH_OFFSET:
+            return validate_signal_output({}, data)
+        numerator_session = self._month_end_sessions[
+            position - self._NUMERATOR_MONTH_OFFSET
+        ]
+        denominator_session = self._month_end_sessions[
+            position - self._DENOMINATOR_MONTH_OFFSET
+        ]
+        ranked: list[tuple[float, str]] = []
+        for symbol in self._SYMBOLS:
+            by_session = {
+                observation.session: observation.indicator_close
+                for observation in data.observations(symbol)
+                if observation.session <= as_of
+            }
+            numerator = by_session.get(numerator_session)
+            denominator = by_session.get(denominator_session)
+            if (
+                numerator is None
+                or denominator is None
+                or numerator <= 0
+                or denominator <= 0
+            ):
+                return validate_signal_output({}, data)
+            momentum = numerator / denominator - 1.0
+            if not math.isfinite(momentum):
+                return validate_signal_output({}, data)
+            ranked.append((momentum, symbol))
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        winner = ranked[0][1]
+        loser = ranked[1][1]
+        return validate_signal_output(
+            {winner: self._ACTIVE_WEIGHT, loser: Decimal("0")},
+            data,
+        )
 
 
 _FIXED_DECIMAL_CONTEXT = decimal.Context(prec=50, rounding=decimal.ROUND_DOWN)

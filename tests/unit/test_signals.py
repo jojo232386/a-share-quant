@@ -21,6 +21,7 @@ from aquant.release_synthetic import build_public_v01_inputs
 from aquant.research.signals import (
     SIGNAL_REGISTRY,
     AbsoluteMomentumSignal,
+    MonthlyRelativeMomentumSignal,
     Signal,
     SignalError,
     SignalInput,
@@ -461,7 +462,137 @@ def test_absolute_momentum_rejects_invalid_parameters():
 
 
 # ---------------------------------------------------------------------------
-# E. Canonical baseline classification equivalence (public v01 fixture)
+# E. A4-3 monthly prior 2-12 relative momentum
+# ---------------------------------------------------------------------------
+
+
+_A4_3_MONTH_ENDS = tuple(
+    date(year, month, day)
+    for year, month, day in (
+        (2018, 1, 31),
+        (2018, 2, 28),
+        (2018, 3, 30),
+        (2018, 4, 30),
+        (2018, 5, 31),
+        (2018, 6, 29),
+        (2018, 7, 31),
+        (2018, 8, 31),
+        (2018, 9, 28),
+        (2018, 10, 31),
+        (2018, 11, 30),
+        (2018, 12, 28),
+        (2019, 1, 31),
+    )
+)
+
+
+def _a4_3_input(
+    closes_510300: tuple[float, ...],
+    closes_510500: tuple[float, ...],
+    *,
+    as_of: date = date(2019, 1, 31),
+) -> SignalInput:
+    return SignalInput(
+        as_of=as_of,
+        per_symbol={
+            "510300": tuple(
+                SignalObservation(session, close)
+                for session, close in zip(
+                    _A4_3_MONTH_ENDS, closes_510300, strict=True
+                )
+            ),
+            "510500": tuple(
+                SignalObservation(session, close)
+                for session, close in zip(
+                    _A4_3_MONTH_ENDS, closes_510500, strict=True
+                )
+            ),
+        },
+    )
+
+
+def _a4_3_signal() -> MonthlyRelativeMomentumSignal:
+    return MonthlyRelativeMomentumSignal(month_end_sessions=_A4_3_MONTH_ENDS)
+
+
+def test_a4_3_only_month_end_creates_a_new_decision():
+    signal = _a4_3_signal()
+    data = _a4_3_input(
+        (10.0,) * 11 + (20.0, 1.0),
+        (10.0,) * 11 + (15.0, 1000.0),
+        as_of=date(2019, 2, 1),
+    )
+    assert signal.compute(date(2019, 2, 1), data) == {}
+
+
+def test_a4_3_prior_2_12_uses_previous_and_twelve_month_back_endpoints():
+    data = _a4_3_input(
+        (10.0,) * 11 + (20.0, 1.0),
+        (10.0,) * 11 + (15.0, 1000.0),
+    )
+    assert _a4_3_signal().compute(data.as_of, data) == {
+        "510300": Decimal("0.95"),
+        "510500": Decimal("0"),
+    }
+
+
+def test_a4_3_tie_break_is_ascending_symbol():
+    data = _a4_3_input(
+        (10.0,) * 11 + (15.0, 20.0),
+        (10.0,) * 11 + (15.0, 30.0),
+    )
+    assert _a4_3_signal().compute(data.as_of, data) == {
+        "510300": Decimal("0.95"),
+        "510500": Decimal("0"),
+    }
+
+
+def test_a4_3_missing_one_symbol_endpoint_is_whole_strategy_no_decision():
+    data = SignalInput(
+        as_of=date(2019, 1, 31),
+        per_symbol={
+            "510300": tuple(
+                SignalObservation(session, 10.0)
+                for session in _A4_3_MONTH_ENDS
+            ),
+            "510500": tuple(
+                SignalObservation(session, 10.0)
+                for session in _A4_3_MONTH_ENDS
+                if session != date(2018, 12, 28)
+            ),
+        },
+    )
+    assert _a4_3_signal().compute(data.as_of, data) == {}
+
+
+def test_a4_3_both_negative_still_holds_relative_winner():
+    data = _a4_3_input(
+        (10.0,) * 11 + (9.0, 9.0),
+        (10.0,) * 11 + (8.0, 8.0),
+    )
+    assert _a4_3_signal().compute(data.as_of, data) == {
+        "510300": Decimal("0.95"),
+        "510500": Decimal("0"),
+    }
+
+
+def test_a4_3_rejects_any_symbol_outside_frozen_eligibility():
+    data = SignalInput(
+        as_of=date(2019, 1, 31),
+        per_symbol={
+            symbol: tuple(
+                SignalObservation(session, 10.0) for session in _A4_3_MONTH_ENDS
+            )
+            for symbol in ("510300", "510500", "600519")
+        },
+    )
+    with pytest.raises(SignalError) as exc:
+        _a4_3_signal().compute(data.as_of, data)
+    assert exc.value.code == "eligible_universe_mismatch"
+
+
+# ---------------------------------------------------------------------------
+# F. Canonical baseline classification equivalence (public v01 fixture)
 # ---------------------------------------------------------------------------
 
 

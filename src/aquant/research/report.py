@@ -16,16 +16,21 @@ from pathlib import Path
 
 from aquant.research.loop import (
     STRATEGY_ABSOLUTE_MOMENTUM_252,
+    STRATEGY_MONTHLY_RELATIVE_MOMENTUM_2_12,
     STRATEGY_VOLATILITY_REGIME_DEFENSE,
     ResearchLoopResult,
     ResearchPathResult,
     research_config_payload,
 )
 
-REPORT_SCHEMA_VERSION = "1.3.0"
+REPORT_SCHEMA_VERSION = "1.4.0"
 
 _A4_STRATEGIES = frozenset(
-    {STRATEGY_VOLATILITY_REGIME_DEFENSE, STRATEGY_ABSOLUTE_MOMENTUM_252}
+    {
+        STRATEGY_VOLATILITY_REGIME_DEFENSE,
+        STRATEGY_ABSOLUTE_MOMENTUM_252,
+        STRATEGY_MONTHLY_RELATIVE_MOMENTUM_2_12,
+    }
 )
 
 
@@ -155,6 +160,34 @@ def _decision_reason(result: ResearchLoopResult, assessment: str) -> str:
 
 
 def _run_json(result: ResearchLoopResult, assessment: str) -> bytes:
+    if result.config.strategy == STRATEGY_MONTHLY_RELATIVE_MOMENTUM_2_12:
+        input_identity = {
+            "market_snapshot_ids": dict(result.market_snapshot_ids),
+            "market_file_sha256s": dict(result.market_file_sha256s),
+            "corporate_action_snapshot_ids": dict(
+                result.corporate_action_snapshot_ids
+            ),
+            "corporate_action_file_sha256s": dict(
+                result.corporate_action_file_sha256s
+            ),
+            "calendar_id": result.calendar_id,
+            "calendar_file_sha256": result.calendar_file_sha256,
+            "universe_id": result.universe_id,
+            "fee_policy_digest": result.fee_policy_digest,
+            "price_stream_version": result.price_stream_version,
+        }
+    else:
+        input_identity = {
+            "market_snapshot_id": result.market_snapshot_id,
+            "market_file_sha256": result.market_file_sha256,
+            "corporate_action_snapshot_id": result.corporate_action_snapshot_id,
+            "corporate_action_file_sha256": result.corporate_action_file_sha256,
+            "calendar_id": result.calendar_id,
+            "calendar_file_sha256": result.calendar_file_sha256,
+            "universe_id": result.universe_id,
+            "fee_policy_digest": result.fee_policy_digest,
+            "price_stream_version": result.price_stream_version,
+        }
     values = {
         "schema_version": result.schema_version,
         "report_schema_version": REPORT_SCHEMA_VERSION,
@@ -166,17 +199,7 @@ def _run_json(result: ResearchLoopResult, assessment: str) -> bytes:
         },
         "implementation_digest": result.implementation_digest,
         "input_digest": result.input_digest,
-        "input_identity": {
-            "market_snapshot_id": result.market_snapshot_id,
-            "market_file_sha256": result.market_file_sha256,
-            "corporate_action_snapshot_id": result.corporate_action_snapshot_id,
-            "corporate_action_file_sha256": result.corporate_action_file_sha256,
-            "calendar_id": result.calendar_id,
-            "calendar_file_sha256": result.calendar_file_sha256,
-            "universe_id": result.universe_id,
-            "fee_policy_digest": result.fee_policy_digest,
-            "price_stream_version": result.price_stream_version,
-        },
+        "input_identity": input_identity,
         "config": research_config_payload(result.config),
         "instrument_kind": result.instrument_kind.value,
         "simulation_start": result.simulation_start.isoformat(),
@@ -194,7 +217,12 @@ def _run_json(result: ResearchLoopResult, assessment: str) -> bytes:
             "t_plus_one": True,
             "fees": "verified date-effective fee policy",
             "dividends": ("ex-date entitlement; same-session cash posted after open rebalance"),
-            "benchmark": "one initial target-weight buy, then hold",
+            "benchmark": (
+                "initial 47.5% / 47.5% targets, then no active rebalancing"
+                if result.config.strategy
+                == STRATEGY_MONTHLY_RELATIVE_MOMENTUM_2_12
+                else "one initial target-weight buy, then hold"
+            ),
         },
         "row_counts": {
             "strategy_sessions": len(result.strategy.equity_curve),
@@ -237,7 +265,11 @@ def _metrics_json(result: ResearchLoopResult, assessment: str) -> bytes:
         "definitions": {
             "annual_sessions": 252,
             "risk_free_rate": 0.0,
-            "turnover": "gross traded notional divided by average daily equity",
+            "turnover": (
+                "raw gross traded notional divided by average daily equity; "
+                "100.0 raw equals 10,000%"
+            ),
+            "annualized_gross_turnover": "secondary diagnostic only",
             "transaction_count": "completed buy and sell fills",
         },
         "strategy": strategy,
@@ -307,6 +339,7 @@ def _trades_csv(result: ResearchLoopResult) -> bytes:
             {
                 "portfolio": path.label,
                 "order_id": fill.order_id,
+                "symbol": fill.order_id.rsplit(":", 1)[-1],
                 "execution_date": fill.execution_date.isoformat(),
                 "side": fill.side,
                 "size": fill.size,
@@ -320,6 +353,7 @@ def _trades_csv(result: ResearchLoopResult) -> bytes:
         (
             "portfolio",
             "order_id",
+            "symbol",
             "execution_date",
             "side",
             "size",
@@ -337,21 +371,28 @@ def _targets_csv(result: ResearchLoopResult) -> bytes:
     for plan in result.strategy.plans:
         decision = decisions[plan.as_of]
         output = dict(decision.output)
-        emitted = output.get(result.config.symbol)
-        rows.append(
-            {
-                "as_of": plan.as_of.isoformat(),
-                "data_available": str(decision.data_available).lower(),
-                "signal_state": (
-                    "no_decision" if emitted is None else "flat" if emitted == 0 else "active"
-                ),
-                "signal_weight": "" if emitted is None else str(emitted),
-                "effective_target_weight": str(plan.targets.get(result.config.symbol, 0)),
-            }
-        )
+        for symbol in result.config.symbols:
+            emitted = output.get(symbol)
+            rows.append(
+                {
+                    "as_of": plan.as_of.isoformat(),
+                    "symbol": symbol,
+                    "data_available": str(decision.data_available).lower(),
+                    "signal_state": (
+                        "no_decision"
+                        if emitted is None
+                        else "flat"
+                        if emitted == 0
+                        else "active"
+                    ),
+                    "signal_weight": "" if emitted is None else str(emitted),
+                    "effective_target_weight": str(plan.targets.get(symbol, 0)),
+                }
+            )
     return _csv_bytes(
         (
             "as_of",
+            "symbol",
             "data_available",
             "signal_state",
             "signal_weight",
@@ -367,6 +408,7 @@ def _attempts_csv(result: ResearchLoopResult) -> bytes:
             "attempt_id": item.attempt_id,
             "plan_as_of": item.plan_as_of.isoformat(),
             "execution_session": item.execution_session.isoformat(),
+            "symbol": item.symbol,
             "side": item.side.value,
             "requested_size": item.requested_size,
             "filled_size": item.filled_size,
@@ -383,6 +425,7 @@ def _attempts_csv(result: ResearchLoopResult) -> bytes:
             "attempt_id",
             "plan_as_of",
             "execution_session",
+            "symbol",
             "side",
             "requested_size",
             "filled_size",
@@ -399,6 +442,7 @@ def _dividends_csv(result: ResearchLoopResult) -> bytes:
         {
             "portfolio": path.label,
             "event_id": item.event_id,
+            "symbol": item.symbol,
             "ex_date": item.ex_date.isoformat(),
             "source_payable_date": item.source_payable_date.isoformat(),
             "actual_cash_date": item.actual_cash_date.isoformat(),
@@ -413,6 +457,7 @@ def _dividends_csv(result: ResearchLoopResult) -> bytes:
         (
             "portfolio",
             "event_id",
+            "symbol",
             "ex_date",
             "source_payable_date",
             "actual_cash_date",
@@ -442,15 +487,21 @@ def _markdown(result: ResearchLoopResult, assessment: str) -> str:
             "REJECT": "至少一项预注册核心门槛失败；本 hypothesis 淘汰，不调参救援。",
             "INSUFFICIENT_EVIDENCE": "数据或执行证据不完整，无法形成研究结论。",
         }[assessment]
-        strategy_description = (
-            f"20 日实现波动率（阈值 {result.config.volatility_threshold}，"
-            f"年化 {result.config.annualization}）→ 冻结 Planner → 滚动组合"
-            if result.config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE
-            else (
+        if result.config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE:
+            strategy_description = (
+                f"20 日实现波动率（阈值 {result.config.volatility_threshold}，"
+                f"年化 {result.config.annualization}）→ 冻结 Planner → 滚动组合"
+            )
+        elif result.config.strategy == STRATEGY_ABSOLUTE_MOMENTUM_252:
+            strategy_description = (
                 f"{result.config.lookback_sessions} 个交易期绝对动量（阈值 0）"
                 "→ 冻结 Planner → 滚动组合"
             )
-        )
+        else:
+            strategy_description = (
+                "510300 / 510500 月频 prior 2-12 相对动量（赢家 95%，现金 5%）"
+                "→ 冻结 Planner → shared-cash 滚动组合"
+            )
         threshold_description = (
             "门槛预先固定为：年化收益不低于 benchmark 的 70%，Sharpe 至少高 0.10，"
             "最大回撤不高于 benchmark 的 80%，毛换手率不超过 10,000%。"
@@ -458,9 +509,12 @@ def _markdown(result: ResearchLoopResult, assessment: str) -> str:
         if result.config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE:
             title = "# A4-1 510300 Volatility Regime Defense 研究报告"
             decision_label = "A4_1_DECISION"
-        else:
+        elif result.config.strategy == STRATEGY_ABSOLUTE_MOMENTUM_252:
             title = "# A4-2 510300 Absolute Momentum 252 研究报告"
             decision_label = "A4_2_DECISION"
+        else:
+            title = "# A4-3 510300 / 510500 Monthly Relative Momentum 2-12 研究报告"
+            decision_label = "A4_3_DECISION"
     else:
         verdict = (
             "达到继续验证门槛：值得进入样本外与参数敏感性检验。"
@@ -474,14 +528,34 @@ def _markdown(result: ResearchLoopResult, assessment: str) -> str:
         )
         title = "# Research Loop v1 研究报告"
         decision_label = "RESEARCH_LOOP_DECISION"
+    is_a4_3 = result.config.strategy == STRATEGY_MONTHLY_RELATIVE_MOMENTUM_2_12
+    subject = ", ".join(result.config.symbols)
+    benchmark_description = (
+        "初始 510300=47.5%、510500=47.5%、现金=5%，次日开盘建仓后不主动再平衡"
+        if is_a4_3
+        else "首个收盘生成一次目标仓位，次日开盘买入后持有"
+    )
+    market_identity = (
+        ", ".join(f"{symbol}={identity}" for symbol, identity in result.market_snapshot_ids)
+        if is_a4_3
+        else result.market_snapshot_id
+    )
+    action_identity = (
+        ", ".join(
+            f"{symbol}={identity}"
+            for symbol, identity in result.corporate_action_snapshot_ids
+        )
+        if is_a4_3
+        else result.corporate_action_snapshot_id
+    )
     lines = [
         title,
         "",
-        f"- 标的：`{result.config.symbol}`",
+        f"- 标的：`{subject}`",
         f"- 区间：`{result.simulation_start}` 至 `{result.simulation_end}`",
         f"- 初始资金：{result.config.initial_cash_fen / 100:,.2f} 元",
         f"- 策略：{strategy_description}",
-        "- Benchmark：首个收盘生成一次目标仓位，次日开盘买入后持有",
+        f"- Benchmark：{benchmark_description}",
         "",
         "## 核心结果",
         "",
@@ -502,8 +576,17 @@ def _markdown(result: ResearchLoopResult, assessment: str) -> str:
             f"{_ratio(benchmark.sharpe_zero_rate)} |"
         ),
         (
-            f"| 毛换手率 | {_percent(strategy.gross_turnover)} | "
+            f"| 毛换手率（raw ratio） | {strategy.gross_turnover:.6f} | "
+            f"{benchmark.gross_turnover:.6f} |"
+        ),
+        (
+            f"| 毛换手率（percent） | {_percent(strategy.gross_turnover)} | "
             f"{_percent(benchmark.gross_turnover)} |"
+        ),
+        (
+            f"| 年化毛换手率（secondary） | "
+            f"{strategy.annualized_gross_turnover:.6f} | "
+            f"{benchmark.annualized_gross_turnover:.6f} |"
         ),
         (
             f"| 交易次数 | {result.strategy.transaction_count} | "
@@ -522,8 +605,8 @@ def _markdown(result: ResearchLoopResult, assessment: str) -> str:
         "",
         "## 审计边界",
         "",
-        f"- 行情快照：`{result.market_snapshot_id}`",
-        f"- 公司行动快照：`{result.corporate_action_snapshot_id}`",
+        f"- 行情快照：`{market_identity}`",
+        f"- 公司行动快照：`{action_identity}`",
         f"- 交易日历：`{result.calendar_id}`",
         f"- 费用规则：`{result.fee_policy_digest}`",
         f"- 实现摘要：`{result.implementation_digest}`",
@@ -538,7 +621,11 @@ def _markdown(result: ResearchLoopResult, assessment: str) -> str:
         ),
         "- 同日应付分红在开盘再平衡后入账，不能为该次开盘买入提供资金。",
         "- 收益包含现有日期有效费用假设，未包含滑点、冲击成本、容量约束和税后分红差异。",
-        "- 本报告是单标的全样本观察；样本外、参数敏感性和替代 benchmark 均未完成。",
+        (
+            "- 本报告是冻结双 ETF 全样本观察；样本外、参数敏感性和替代 benchmark 均未完成。"
+            if is_a4_3
+            else "- 本报告是单标的全样本观察；样本外、参数敏感性和替代 benchmark 均未完成。"
+        ),
         "",
     ]
     return "\n".join(lines)
