@@ -8,16 +8,27 @@ import re
 import sys
 from collections.abc import Sequence
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from aquant.backtest import load_verified_snapshot
 from aquant.cli_support import make_safe_argument_parser, path_beneath, write_json
 from aquant.data.calendar_snapshot import CalendarSnapshotStore, load_verified_calendar
+from aquant.data.corporate_actions import (
+    load_verified_corporate_actions,
+    read_corporate_action_manifest,
+)
+from aquant.data.manifest import ManifestWriter
+from aquant.planner import PlannerLimits
+from aquant.research.loop import ResearchLoopConfig, run_research_loop
+from aquant.research.report import build_research_report, publish_research_report
 from aquant.research.week5 import (
     Week5Error,
     build_week5_report,
     load_verified_run_series,
     publish_week5_report,
 )
+from aquant.rules import default_fee_policy
 from aquant.universe import load_verified_universe
 
 _HASH_RE = re.compile(r"[0-9a-f]{64}")
@@ -55,6 +66,22 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--holdout-start", required=True)
     run.add_argument("--periods", default="10,20,60")
     run.add_argument("--replay-days", type=int, default=10)
+
+    research = subparsers.add_parser(
+        "research-loop",
+        help="run the verified single-symbol Research Loop v1",
+    )
+    research.add_argument("--project-root", default=".")
+    research.add_argument("--data-root", default=".")
+    research.add_argument("--universe-id", required=True)
+    research.add_argument("--calendar-id", required=True)
+    research.add_argument("--snapshot-id", required=True)
+    research.add_argument("--corporate-action-snapshot-id", required=True)
+    research.add_argument("--symbol", required=True)
+    research.add_argument("--initial-cash-yuan", default="1000000.00")
+    research.add_argument("--sma-period", type=int, default=20)
+    research.add_argument("--active-weight", default="0.95")
+    research.add_argument("--output", default="outputs/research_loop")
     return parser
 
 
@@ -117,10 +144,129 @@ def _find_one(
     return matches[0]
 
 
+def _exact_record(records, *, identity: str, label: str):
+    matches = tuple(
+        item
+        for item in records
+        if getattr(item, "snapshot_id", getattr(item, "calendar_id", None)) == identity
+    )
+    if len(matches) != 1:
+        raise ExperimentCliError(
+            "record_not_found",
+            f"requested {label} must exist exactly once",
+        )
+    return matches[0]
+
+
+def _parse_cash_fen(value: str) -> int:
+    try:
+        amount = Decimal(value)
+    except (InvalidOperation, ValueError) as exc:
+        raise ExperimentCliError(
+            "invalid_arguments",
+            "initial cash must be an exact positive yuan amount",
+        ) from exc
+    if not amount.is_finite() or amount <= 0 or amount.as_tuple().exponent < -2:
+        raise ExperimentCliError(
+            "invalid_arguments",
+            "initial cash must be an exact positive yuan amount with at most two decimals",
+        )
+    return int(amount * 100)
+
+
+def _run_research_loop_command(args) -> dict[str, object]:
+    project_root = Path(args.project_root).resolve()
+    data_root = Path(args.data_root).resolve()
+    identities = (
+        args.universe_id,
+        args.calendar_id,
+        args.snapshot_id,
+        args.corporate_action_snapshot_id,
+    )
+    if any(_HASH_RE.fullmatch(value) is None for value in identities):
+        raise ExperimentCliError(
+            "invalid_arguments",
+            "all requested input IDs must be SHA-256 values",
+        )
+    if not data_root.is_dir() or data_root.is_symlink():
+        raise ExperimentCliError(
+            "invalid_data_root",
+            "data root must be a safe directory",
+        )
+    try:
+        active_weight = Decimal(args.active_weight)
+    except (InvalidOperation, ValueError) as exc:
+        raise ExperimentCliError(
+            "invalid_arguments",
+            "active weight must be an exact decimal",
+        ) from exc
+    config = ResearchLoopConfig(
+        symbol=args.symbol,
+        initial_cash_fen=_parse_cash_fen(args.initial_cash_yuan),
+        sma_period=args.sma_period,
+        active_weight=active_weight,
+        limits=PlannerLimits(
+            max_single_weight=active_weight,
+            max_gross=active_weight,
+            min_cash_ratio=Decimal("1") - active_weight,
+        ),
+    )
+    universe = load_verified_universe(
+        project_root / "configs" / "universes" / f"{args.universe_id}.json",
+        expected_id=args.universe_id,
+    )
+    market_record = _exact_record(
+        ManifestWriter(data_root / "data" / "manifests" / "manifest.jsonl").read_all(),
+        identity=args.snapshot_id,
+        label="market snapshot",
+    )
+    action_record = _exact_record(
+        read_corporate_action_manifest(data_root),
+        identity=args.corporate_action_snapshot_id,
+        label="corporate-action snapshot",
+    )
+    calendar_record = _exact_record(
+        CalendarSnapshotStore(data_root).read_manifest(),
+        identity=args.calendar_id,
+        label="calendar",
+    )
+    if market_record.symbol != args.symbol or action_record.symbol != args.symbol:
+        raise ExperimentCliError(
+            "input_identity_mismatch",
+            "requested snapshots do not belong to the requested symbol",
+        )
+    result = run_research_loop(
+        config=config,
+        market_data=load_verified_snapshot(data_root, market_record),
+        corporate_actions=load_verified_corporate_actions(data_root, action_record),
+        calendar=load_verified_calendar(data_root, calendar_record),
+        fee_policy=default_fee_policy(),
+        universe=universe,
+    )
+    report = build_research_report(result)
+    output_root = path_beneath(
+        project_root,
+        args.output,
+        label="research output",
+        error_factory=ExperimentCliError,
+    )
+    directory = publish_research_report(report, output_root)
+    return {
+        "assessment": report.assessment,
+        "research_directory": directory.relative_to(project_root).as_posix(),
+        "run_id": result.run_id,
+        "status": "ok",
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Build one restricted experiment and return a process exit code."""
     try:
         args = _parser().parse_args(argv)
+        if args.command == "research-loop":
+            response = _run_research_loop_command(args)
+            write_json(sys.stdout, response)
+            return 0
         if args.command != "run":
             raise ExperimentCliError("invalid_arguments", "unsupported experiment command")
         project_root = Path(args.project_root).resolve()
