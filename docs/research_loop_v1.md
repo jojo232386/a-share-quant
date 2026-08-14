@@ -226,6 +226,40 @@ commit `0596352933b617adbb12df881f195fd59264c1a9` 与内容 SHA-256
 `FORMAL_RERUN=FALSE`；Planner、Portfolio、accounting 与成交语义均未改变，且未启动 A4-3。
 该结论仅是本次预注册的单标的全样本研究判定，不证明实盘可行性或收益保证。
 
+## A4-3 formal research closeout
+
+2026-08-14 在精确 `origin/main`
+`e65fdaa071ca3febfe853e61036ea036ed52c50d` 上独立完成 A4-3。只读 preflight 使用 verified
+calendar 与两只 ETF 的快照机械确认首个信号日 `2019-01-31`、首个执行日
+`2019-02-01`。预注册先以 commit `a72461ef80dda2d5e06e396576cb2c7410340371`
+冻结，内容 SHA-256 为
+`95515c87ee2cedbbf52545e4798b5c8b7bcc5b8af13af5d769cdd917d37c6c1b`。
+
+所有工程验收通过后，唯一一次 fresh formal run 使用锁定的非 editable wheel，绑定 Git HEAD
+`7cbc490cc88147d829566346b4a492bd5a3f731e`、tree
+`f6e71a77770ff0c2fe1574904b23124245695296` 与 wheel SHA-256
+`18e43529fc7d8e800b9a18bcaac2afa555f869b9a77ab1482fd0214bade9e613`。
+
+- run ID：`0b072ba64e424c28b59f05b0a70c478c0de38c350d64e2adc5d75f4ec6bfb0cf`；
+- artifact manifest SHA-256：`346b9c1360660325a30c450c33c7940691c55e4e764c744a92b8115ca3122f32`；
+- `run.json` SHA-256：`c99faaa336fe3a18c8913a9b9fabf8ffdcee17ab5f99c67cc42fbfc5efb3499b`；
+- `metrics.json` SHA-256：`88432dea4d6ad8e23d27a0fd369b7fe9d3f1aec8fb78f46f1db587173fbdc5eb`；
+- 策略：总收益 37.97%，年化收益 4.58%，最大回撤 52.85%，Sharpe 0.320，毛换手率
+  raw ratio `16.513773`（1,651.38%），年化毛换手率 secondary diagnostic `2.299155`，
+  19 笔成交；
+- static benchmark：总收益 69.59%，年化收益 7.63%，最大回撤 38.94%，Sharpe 0.483，
+  仅 `2019-02-01` 两笔初始买入，之后没有主动再平衡；
+- 预注册判定：`REJECT`。年化收益低于 benchmark 70% 门槛，Sharpe 未达到 benchmark +
+  0.10，最大回撤高于 benchmark 的 80%；raw turnover `16.513773 <= 100.0` 单项通过；
+- 绩效区间共有 1,811 个官方交易日、零缺失行情；post-run 只读审计重算 manifest 内 8 个
+  artifact 哈希，确认 90 个且仅月末的有效排名日、所有非月末目标 carry-forward、共享现金
+  rotation 的 SELL-before-BUY 顺序，以及 benchmark 只存在两笔初始成交。
+
+该 hypothesis 在 A4-3 止步。`FORMAL_RUN_COUNT=1`、`PARAMETER_RESCUE=FALSE`、
+`FORMAL_RERUN=FALSE`；研究语义、Planner、Portfolio、accounting 与成交语义在 formal run 后
+均未改变，且 `A4_4_STARTED=FALSE`。该结论仅是冻结双 ETF 全样本研究判定，不证明实盘
+可行性或收益保证。
+
 ## 明确延后
 
 - 多标的策略研究与跨标的 benchmark；
