@@ -1,0 +1,77 @@
+{
+  "benchmark": "buy_and_hold",
+  "evaluation_period": {
+    "end": "2026-07-23",
+    "start": "2018-01-02"
+  },
+  "hypothesis": "High-volatility defensive allocation may improve the risk-adjusted performance and maximum drawdown of 510300 without sacrificing more than 30% of Buy & Hold annualized return.",
+  "hypothesis_id": "A4_1_510300_VOLATILITY_REGIME_DEFENSE",
+  "input_identities": {
+    "calendar_id": "fb24e5167d11fee3a58869f8de7910a0ea979d55d3481698bc5baf18cd508983",
+    "corporate_action_snapshot_id": "b16ca276bf8d76637c47a1ae68c85a498f87fb17985262bb529338420903e370",
+    "market_snapshot_id": "904e594e09d5baad4e70c626129b88bef1a596b755a0731ca234d240b02a8071",
+    "universe_id": "bba6760fa738a829bb09a72f0c90919aeba02429018b8fd189c65e2d6c82a20e"
+  },
+  "insufficient_evidence_criteria": [
+    "incomplete_data",
+    "provenance_failure",
+    "formal_runner_failure",
+    "strategy_cannot_be_expressed_by_existing_execution_semantics"
+  ],
+  "invalid_handling": {
+    "non_finite_input": "SignalInput fails closed before producing a decision",
+    "non_finite_return_or_volatility": "NO_DECISION",
+    "non_positive_close": "NO_DECISION"
+  },
+  "pass_criteria": {
+    "strategy_annualized_return": ">= 0.70 * benchmark_annualized_return",
+    "strategy_gross_turnover": "<= 100.0",
+    "strategy_max_drawdown": "<= 0.80 * benchmark_max_drawdown",
+    "strategy_sharpe_zero_rate": ">= benchmark_sharpe_zero_rate + 0.10"
+  },
+  "primary_metrics": [
+    "annualized_return",
+    "sharpe_zero_rate",
+    "max_drawdown",
+    "gross_turnover"
+  ],
+  "reject_criteria": "any_core_threshold_failure",
+  "research_semantics": {
+    "annualized_volatility": "sample_standard_deviation(latest_20_simple_returns, ddof=1) * sqrt(252)",
+    "flat": "explicit Decimal('0') target passed through the existing Planner",
+    "no_decision": "symbol omitted so the existing Planner preserves the previous target",
+    "numeric_convention": "float arithmetic with math.fsum for mean and squared deviations, matching aquant.risk.metrics",
+    "price_series": "causal indicator_close available as of the session close",
+    "return_definition": "indicator_close[t] / indicator_close[t-1] - 1.0",
+    "threshold_boundary": "annualized_volatility <= 0.25 is ACTIVE; annualized_volatility > 0.25 is FLAT",
+    "window_semantics": "latest 20 consecutive close-to-close returns ending at as_of, requiring 21 valid closes",
+    "warm_up": "fewer than 20 returns produces NO_DECISION"
+  },
+  "secondary_metrics": [
+    "total_return",
+    "trade_count"
+  ],
+  "strategy_parameters": {
+    "active_weight": "0.95",
+    "annualization": 252,
+    "initial_cash_fen": 100000000,
+    "limits": {
+      "max_gross": "0.95",
+      "max_single_weight": "0.95",
+      "min_cash_ratio": "0.05"
+    },
+    "lookback_returns": 20,
+    "strategy": "volatility_regime_defense",
+    "symbol": "510300",
+    "volatility_threshold": "0.25"
+  },
+  "subject": "510300",
+  "universe": [
+    "510300"
+  ],
+  "validity_criteria": {
+    "execution_consistency": "required",
+    "invalid_data_behavior": "none",
+    "provenance": "required"
+  }
+}
