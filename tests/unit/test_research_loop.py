@@ -22,6 +22,8 @@ from aquant.data.snapshot import RawSnapshotStore
 from aquant.experiment_cli import main
 from aquant.planner import PlannerLimits
 from aquant.research.loop import (
+    A4_2_INVALID_HANDLING,
+    A4_2_RESEARCH_SEMANTICS,
     A4_INSUFFICIENT_EVIDENCE_CRITERIA,
     A4_INVALID_HANDLING,
     A4_PASS_CRITERIA,
@@ -29,6 +31,7 @@ from aquant.research.loop import (
     A4_RESEARCH_SEMANTICS,
     A4_SECONDARY_METRICS,
     A4_VALIDITY_CRITERIA,
+    STRATEGY_ABSOLUTE_MOMENTUM_252,
     STRATEGY_VOLATILITY_REGIME_DEFENSE,
     ResearchLoopConfig,
     ResearchLoopError,
@@ -77,6 +80,21 @@ def _a4_config() -> ResearchLoopConfig:
         lookback_returns=20,
         annualization=252,
         volatility_threshold=Decimal("0.25"),
+        active_weight=Decimal("0.95"),
+        limits=PlannerLimits(
+            max_single_weight=Decimal("0.95"),
+            max_gross=Decimal("0.95"),
+            min_cash_ratio=Decimal("0.05"),
+        ),
+    )
+
+
+def _a4_2_config() -> ResearchLoopConfig:
+    return ResearchLoopConfig(
+        symbol=SYMBOL,
+        initial_cash_fen=10_000_000,
+        strategy=STRATEGY_ABSOLUTE_MOMENTUM_252,
+        lookback_sessions=252,
         active_weight=Decimal("0.95"),
         limits=PlannerLimits(
             max_single_weight=Decimal("0.95"),
@@ -139,6 +157,37 @@ def _a4_preregistration_content(records) -> bytes:
         "primary_metrics": list(A4_PRIMARY_METRICS),
         "reject_criteria": "any_core_threshold_failure",
         "research_semantics": A4_RESEARCH_SEMANTICS,
+        "secondary_metrics": list(A4_SECONDARY_METRICS),
+        "strategy_parameters": research_config_payload(config),
+        "subject": SYMBOL,
+        "universe": [SYMBOL],
+        "validity_criteria": A4_VALIDITY_CRITERIA,
+    }
+    return (json.dumps(values, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def _a4_2_preregistration_content(records) -> bytes:
+    config = _a4_2_config()
+    values = {
+        "benchmark": "buy_and_hold",
+        "evaluation_period": {
+            "start": MARKET_SESSIONS[0].isoformat(),
+            "end": MARKET_SESSIONS[-1].isoformat(),
+        },
+        "hypothesis": "Absolute momentum may improve risk-adjusted performance.",
+        "hypothesis_id": "A4_2_510300_ABSOLUTE_MOMENTUM_252",
+        "input_identities": {
+            "calendar_id": records[2].calendar_id,
+            "corporate_action_snapshot_id": records[1].snapshot_id,
+            "market_snapshot_id": records[0].snapshot_id,
+            "universe_id": records[6].universe_id,
+        },
+        "insufficient_evidence_criteria": list(A4_INSUFFICIENT_EVIDENCE_CRITERIA),
+        "invalid_handling": A4_2_INVALID_HANDLING,
+        "pass_criteria": A4_PASS_CRITERIA,
+        "primary_metrics": list(A4_PRIMARY_METRICS),
+        "reject_criteria": "any_core_threshold_failure",
+        "research_semantics": A4_2_RESEARCH_SEMANTICS,
         "secondary_metrics": list(A4_SECONDARY_METRICS),
         "strategy_parameters": research_config_payload(config),
         "subject": SYMBOL,
@@ -430,6 +479,50 @@ def test_a4_strategy_parameters_are_frozen_against_rescue():
         assert exc.value.code == "invalid_config"
 
 
+def test_a4_2_absolute_momentum_reuses_loop_and_binds_preregistration(tmp_path):
+    records = _fixture(tmp_path)
+    content = _a4_2_preregistration_content(records)
+    arguments = {
+        "git_head": GIT_HEAD,
+        "preregistration_commit": PREREGISTRATION_COMMIT,
+        "preregistration_content": content,
+        "config": _a4_2_config(),
+        "market_data": records[3],
+        "corporate_actions": records[4],
+        "calendar": records[5],
+        "fee_policy": default_fee_policy(),
+        "universe": records[6],
+    }
+
+    first = run_research_loop(**arguments)
+    second = run_research_loop(**arguments)
+    first_report = build_research_report(first)
+
+    assert first == second
+    assert first_report == build_research_report(second)
+    assert first.strategy.label == "absolute_momentum_252_planner"
+    assert all(not decision.output for decision in first.strategy.decisions)
+    assert first_report.assessment == "REJECT"
+    run = json.loads(first_report.payload["run.json"])
+    assert run["config"] == research_config_payload(_a4_2_config())
+    assert run["preregistration_identity"] == {
+        "commit": PREREGISTRATION_COMMIT,
+        "content_sha256": hashlib.sha256(content).hexdigest(),
+    }
+    assert "A4_2_DECISION" in first_report.payload["report.md"].decode()
+
+
+def test_a4_2_strategy_parameters_are_frozen_against_rescue():
+    config = _a4_2_config()
+    for changes in (
+        {"lookback_sessions": 200},
+        {"active_weight": Decimal("0.90")},
+    ):
+        with pytest.raises(ResearchLoopError) as exc:
+            replace(config, **changes)
+        assert exc.value.code == "invalid_config"
+
+
 def test_research_loop_cli_selects_exact_verified_inputs(tmp_path, capsys):
     records = _fixture(tmp_path)
     preregistration, actual_head = _commit_preregistration(tmp_path)
@@ -512,6 +605,49 @@ def test_a4_cli_binds_frozen_strategy_parameters_and_inputs(tmp_path, capsys):
     run = json.loads((directory / "run.json").read_text())
     assert run["git_head"] == actual_head
     assert run["config"] == research_config_payload(_a4_config())
+    assert run["input_identity"]["market_snapshot_id"] == records[0].snapshot_id
+
+
+def test_a4_2_cli_binds_frozen_strategy_parameters_and_inputs(tmp_path, capsys):
+    records = _fixture(tmp_path)
+    content = _a4_2_preregistration_content(records)
+    preregistration, actual_head = _commit_preregistration(tmp_path, content)
+
+    exit_code = main(
+        [
+            "research-loop",
+            "--project-root",
+            str(tmp_path),
+            "--data-root",
+            str(tmp_path),
+            "--universe-id",
+            records[6].universe_id,
+            "--calendar-id",
+            records[2].calendar_id,
+            "--snapshot-id",
+            records[0].snapshot_id,
+            "--corporate-action-snapshot-id",
+            records[1].snapshot_id,
+            "--preregistration",
+            preregistration,
+            "--symbol",
+            SYMBOL,
+            "--strategy",
+            STRATEGY_ABSOLUTE_MOMENTUM_252,
+            "--lookback-sessions",
+            "252",
+            "--initial-cash-yuan",
+            "100000.00",
+        ]
+    )
+
+    response = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert response["assessment"] == "REJECT"
+    directory = tmp_path / response["research_directory"]
+    run = json.loads((directory / "run.json").read_text())
+    assert run["git_head"] == actual_head
+    assert run["config"] == research_config_payload(_a4_2_config())
     assert run["input_identity"]["market_snapshot_id"] == records[0].snapshot_id
 
 

@@ -15,13 +15,18 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from aquant.research.loop import (
+    STRATEGY_ABSOLUTE_MOMENTUM_252,
     STRATEGY_VOLATILITY_REGIME_DEFENSE,
     ResearchLoopResult,
     ResearchPathResult,
     research_config_payload,
 )
 
-REPORT_SCHEMA_VERSION = "1.2.0"
+REPORT_SCHEMA_VERSION = "1.3.0"
+
+_A4_STRATEGIES = frozenset(
+    {STRATEGY_VOLATILITY_REGIME_DEFENSE, STRATEGY_ABSOLUTE_MOMENTUM_252}
+)
 
 
 class ResearchReportError(RuntimeError):
@@ -80,7 +85,7 @@ def _a4_thresholds(result: ResearchLoopResult) -> dict[str, float | bool | None]
 def _assessment(result: ResearchLoopResult) -> str:
     strategy = result.strategy.metrics
     benchmark = result.benchmark.metrics
-    if result.config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE:
+    if result.config.strategy in _A4_STRATEGIES:
         if result.strategy.missing_market_sessions or result.benchmark.missing_market_sessions:
             return "INSUFFICIENT_EVIDENCE"
         checks = _a4_thresholds(result)
@@ -93,7 +98,13 @@ def _assessment(result: ResearchLoopResult) -> str:
                 "gross_turnover_pass",
             )
         )
-        return "ADVANCE_TO_ROBUSTNESS" if passed else "REJECT"
+        if not passed:
+            return "REJECT"
+        return (
+            "PASS"
+            if result.config.strategy == STRATEGY_ABSOLUTE_MOMENTUM_252
+            else "ADVANCE_TO_ROBUSTNESS"
+        )
     sharpe_better = (
         strategy.sharpe_zero_rate is not None
         and benchmark.sharpe_zero_rate is not None
@@ -109,7 +120,7 @@ def _assessment(result: ResearchLoopResult) -> str:
 
 
 def _assessment_rule(result: ResearchLoopResult) -> str:
-    if result.config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE:
+    if result.config.strategy in _A4_STRATEGIES:
         return (
             "annualized return >= 70% of benchmark; zero-rate Sharpe >= benchmark + 0.10; "
             "max drawdown <= 80% of benchmark; gross turnover <= 100.0"
@@ -121,7 +132,7 @@ def _assessment_rule(result: ResearchLoopResult) -> str:
 
 
 def _decision_reason(result: ResearchLoopResult, assessment: str) -> str:
-    if result.config.strategy != STRATEGY_VOLATILITY_REGIME_DEFENSE:
+    if result.config.strategy not in _A4_STRATEGIES:
         return assessment
     if assessment == "INSUFFICIENT_EVIDENCE":
         return "missing official market sessions prevent a complete comparison"
@@ -231,7 +242,7 @@ def _metrics_json(result: ResearchLoopResult, assessment: str) -> bytes:
         },
         "strategy": strategy,
     }
-    if result.config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE:
+    if result.config.strategy in _A4_STRATEGIES:
         values["decision_reason"] = _decision_reason(result, assessment)
         values["preregistered_thresholds"] = _a4_thresholds(result)
     return (
@@ -424,21 +435,32 @@ def _ratio(value: float | None) -> str:
 def _markdown(result: ResearchLoopResult, assessment: str) -> str:
     strategy = result.strategy.metrics
     benchmark = result.benchmark.metrics
-    if result.config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE:
+    if result.config.strategy in _A4_STRATEGIES:
         verdict = {
             "ADVANCE_TO_ROBUSTNESS": "达到全部预注册门槛；下一阶段才允许开展稳健性检验。",
+            "PASS": "达到全部预注册门槛；下一阶段才允许开展稳健性检验。",
             "REJECT": "至少一项预注册核心门槛失败；本 hypothesis 淘汰，不调参救援。",
             "INSUFFICIENT_EVIDENCE": "数据或执行证据不完整，无法形成研究结论。",
         }[assessment]
         strategy_description = (
             f"20 日实现波动率（阈值 {result.config.volatility_threshold}，"
             f"年化 {result.config.annualization}）→ 冻结 Planner → 滚动组合"
+            if result.config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE
+            else (
+                f"{result.config.lookback_sessions} 个交易期绝对动量（阈值 0）"
+                "→ 冻结 Planner → 滚动组合"
+            )
         )
         threshold_description = (
             "门槛预先固定为：年化收益不低于 benchmark 的 70%，Sharpe 至少高 0.10，"
             "最大回撤不高于 benchmark 的 80%，毛换手率不超过 10,000%。"
         )
-        title = "# A4-1 510300 Volatility Regime Defense 研究报告"
+        if result.config.strategy == STRATEGY_VOLATILITY_REGIME_DEFENSE:
+            title = "# A4-1 510300 Volatility Regime Defense 研究报告"
+            decision_label = "A4_1_DECISION"
+        else:
+            title = "# A4-2 510300 Absolute Momentum 252 研究报告"
+            decision_label = "A4_2_DECISION"
     else:
         verdict = (
             "达到继续验证门槛：值得进入样本外与参数敏感性检验。"
@@ -451,6 +473,7 @@ def _markdown(result: ResearchLoopResult, assessment: str) -> str:
             "benchmark。它只是研究优先级判断，不证明 Alpha、稳健性或实盘可交易性。"
         )
         title = "# Research Loop v1 研究报告"
+        decision_label = "RESEARCH_LOOP_DECISION"
     lines = [
         title,
         "",
@@ -489,7 +512,7 @@ def _markdown(result: ResearchLoopResult, assessment: str) -> str:
         "",
         "## 初步判断",
         "",
-        f"- A4_1_DECISION：`{assessment}`",
+        f"- {decision_label}：`{assessment}`",
         f"- DECISION_REASON：{_decision_reason(result, assessment)}",
         "",
         verdict,
