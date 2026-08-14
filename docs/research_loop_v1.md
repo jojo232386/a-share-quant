@@ -28,6 +28,17 @@ Verified Market Snapshot
 
 `project-root` 提供标的域配置和输出位置；`data-root` 可指向独立的真实数据快照根目录。所有输入均以精确 ID 选择，不使用“最新文件”隐式规则。
 
+正式运行还必须通过 `--preregistration` 指向仓库内的 JSON 研究预注册文件。该文件必须在运行前已提交，且工作树必须干净；程序会自动绑定完整 Git HEAD、该文件最后修改的 commit 和内容 SHA-256。预注册最小内容为：
+
+- `hypothesis`；
+- 与当次单标的运行一致的 `universe` 和 `evaluation_period`；
+- `primary_metrics`：`total_return`、`sharpe_zero_rate`、`max_drawdown`；
+- `benchmark`：`buy_and_hold`；
+- 与现有 assessment 规则一致的 `pass_criteria` 和 `reject_criteria`；
+- 与当次 CLI 实际配置一致的 `strategy_parameters`。
+
+任一内容不匹配、未提交或运行前被修改，都会在产生正式 result artifact 前失败。
+
 ```bash
 uv run --no-sync aquant-experiment research-loop \
   --project-root . \
@@ -36,6 +47,7 @@ uv run --no-sync aquant-experiment research-loop \
   --calendar-id <sha256> \
   --snapshot-id <market-snapshot-sha256> \
   --corporate-action-snapshot-id <corporate-action-snapshot-sha256> \
+  --preregistration configs/research/<hypothesis>.json \
   --symbol 510300 \
   --sma-period 20 \
   --initial-cash-yuan 1000000.00 \
@@ -46,7 +58,7 @@ uv run --no-sync aquant-experiment research-loop \
 
 `outputs/research_loop/<run_id>/` 包含：
 
-- `run.json`：输入身份、参数、执行口径和行数；
+- `run.json`：Git HEAD、预注册 commit/内容 SHA-256、真实输入身份、参数、执行口径和行数；
 - `metrics.json`：策略、benchmark 及差异；
 - `equity.csv`：每日净值与回撤；
 - `targets.csv`：每日 Signal 三态与 Planner 有效目标；
@@ -70,6 +82,8 @@ uv run --no-sync aquant-experiment research-loop \
 SMA(20) 在费后总收益 -10.83%、年化 -1.38%、最大回撤 32.76%、Sharpe -0.045；买入持有 benchmark 总收益 30.03%、年化 3.24%、最大回撤 38.49%、Sharpe 0.269。该假设未达到“继续验证”预设门槛。
 
 这只是单标的全样本初筛。在任何更强研究结论前，仍需完成样本外测试、参数敏感性、成本/滑点压力和数据时点有效性检查。
+
+上述 SMA(20) 结果产生于本次预注册约束之前；本次加固不重跑、不调参，也不改变其 `insufficient_preliminary_evidence` 结论。
 
 ## 明确延后
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from collections.abc import Sequence
 from datetime import date
@@ -77,6 +78,7 @@ def _parser() -> argparse.ArgumentParser:
     research.add_argument("--calendar-id", required=True)
     research.add_argument("--snapshot-id", required=True)
     research.add_argument("--corporate-action-snapshot-id", required=True)
+    research.add_argument("--preregistration", required=True)
     research.add_argument("--symbol", required=True)
     research.add_argument("--initial-cash-yuan", default="1000000.00")
     research.add_argument("--sma-period", type=int, default=20)
@@ -174,9 +176,95 @@ def _parse_cash_fen(value: str) -> int:
     return int(amount * 100)
 
 
+def _git_output(project_root: Path, *arguments: str) -> bytes:
+    try:
+        completed = subprocess.run(
+            ("git", "-C", str(project_root), *arguments),
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ExperimentCliError(
+            "git_identity_unavailable",
+            "formal research Git identity cannot be resolved",
+        ) from exc
+    if completed.returncode != 0:
+        raise ExperimentCliError(
+            "git_identity_unavailable",
+            "formal research Git identity cannot be resolved",
+        )
+    return completed.stdout
+
+
+def _committed_preregistration(
+    project_root: Path,
+    value: str,
+) -> tuple[str, str, bytes]:
+    repository_root = Path(
+        _git_output(project_root, "rev-parse", "--show-toplevel").decode("utf-8").strip()
+    ).resolve()
+    if repository_root != project_root:
+        raise ExperimentCliError(
+            "git_identity_mismatch",
+            "project root must be the formal research repository root",
+        )
+    git_head = (
+        _git_output(project_root, "rev-parse", "--verify", "HEAD^{commit}")
+        .decode("ascii")
+        .strip()
+    )
+    if re.fullmatch(r"[0-9a-f]{40}", git_head) is None:
+        raise ExperimentCliError(
+            "git_identity_unavailable",
+            "formal research Git identity cannot be resolved",
+        )
+    if _git_output(project_root, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise ExperimentCliError(
+            "repository_not_clean",
+            "formal research requires a clean committed repository",
+        )
+    path = path_beneath(
+        project_root,
+        value,
+        label="preregistration",
+        error_factory=ExperimentCliError,
+    )
+    if path.is_symlink() or not path.is_file():
+        raise ExperimentCliError(
+            "preregistration_not_found",
+            "preregistration must be a regular file in the project repository",
+        )
+    relative = path.relative_to(project_root).as_posix()
+    _git_output(project_root, "ls-files", "--error-unmatch", "--", relative)
+    committed_content = _git_output(project_root, "show", f"HEAD:{relative}")
+    content = path.read_bytes()
+    if content != committed_content:
+        raise ExperimentCliError(
+            "preregistration_not_committed",
+            "preregistration must match the content committed at Git HEAD",
+        )
+    preregistration_commit = (
+        _git_output(project_root, "log", "-1", "--format=%H", "--", relative)
+        .decode("ascii")
+        .strip()
+    )
+    if re.fullmatch(r"[0-9a-f]{40}", preregistration_commit) is None:
+        raise ExperimentCliError(
+            "preregistration_not_committed",
+            "preregistration must already be committed before the formal run",
+        )
+    return git_head, preregistration_commit, content
+
+
 def _run_research_loop_command(args) -> dict[str, object]:
     project_root = Path(args.project_root).resolve()
     data_root = Path(args.data_root).resolve()
+    git_head, preregistration_commit, preregistration_content = _committed_preregistration(
+        project_root,
+        args.preregistration,
+    )
     identities = (
         args.universe_id,
         args.calendar_id,
@@ -236,6 +324,9 @@ def _run_research_loop_command(args) -> dict[str, object]:
             "requested snapshots do not belong to the requested symbol",
         )
     result = run_research_loop(
+        git_head=git_head,
+        preregistration_commit=preregistration_commit,
+        preregistration_content=preregistration_content,
         config=config,
         market_data=load_verified_snapshot(data_root, market_record),
         corporate_actions=load_verified_corporate_actions(data_root, action_record),

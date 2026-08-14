@@ -16,7 +16,7 @@ from pathlib import Path
 
 from aquant.research.loop import ResearchLoopResult, ResearchPathResult
 
-REPORT_SCHEMA_VERSION = "1.0.0"
+REPORT_SCHEMA_VERSION = "1.1.0"
 
 
 class ResearchReportError(RuntimeError):
@@ -67,6 +67,11 @@ def _run_json(result: ResearchLoopResult, assessment: str) -> bytes:
         "schema_version": result.schema_version,
         "report_schema_version": REPORT_SCHEMA_VERSION,
         "run_id": result.run_id,
+        "git_head": result.git_head,
+        "preregistration_identity": {
+            "commit": result.preregistration_commit,
+            "content_sha256": result.preregistration_sha256,
+        },
         "implementation_digest": result.implementation_digest,
         "input_digest": result.input_digest,
         "input_identity": {
@@ -400,6 +405,11 @@ def _markdown(result: ResearchLoopResult, assessment: str) -> str:
         f"- 交易日历：`{result.calendar_id}`",
         f"- 费用规则：`{result.fee_policy_digest}`",
         f"- 实现摘要：`{result.implementation_digest}`",
+        f"- Git HEAD：`{result.git_head}`",
+        (
+            f"- 预注册：commit `{result.preregistration_commit}` / "
+            f"content SHA-256 `{result.preregistration_sha256}`"
+        ),
         (
             f"- 结算缓冲交易日：`{result.settlement_buffer_session}`；该日用于确保最后一次买入"
             "具有可验证 T+1 可用日，不进入绩效区间。"

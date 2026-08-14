@@ -59,7 +59,17 @@ from aquant.rules import (
 )
 from aquant.universe import VerifiedUniverse, verify_universe
 
-RESEARCH_LOOP_SCHEMA_VERSION = "1.0.0"
+RESEARCH_LOOP_SCHEMA_VERSION = "1.1.0"
+PREREGISTRATION_PRIMARY_METRICS = (
+    "total_return",
+    "sharpe_zero_rate",
+    "max_drawdown",
+)
+PREREGISTRATION_PASS_CRITERIA = {
+    "strategy_total_return": "> benchmark_total_return",
+    "strategy_sharpe_zero_rate": "> benchmark_sharpe_zero_rate",
+    "strategy_max_drawdown": "<= benchmark_max_drawdown",
+}
 _IMPLEMENTATION_FILES = (
     "experiment_cli.py",
     "research/loop.py",
@@ -162,6 +172,9 @@ class ResearchPathResult:
 class ResearchLoopResult:
     schema_version: str
     run_id: str
+    git_head: str
+    preregistration_commit: str
+    preregistration_sha256: str
     implementation_digest: str
     input_digest: str
     market_snapshot_id: str
@@ -761,6 +774,9 @@ def _validate_inputs(
 
 def _identity_payload(
     *,
+    git_head: str,
+    preregistration_commit: str,
+    preregistration_sha256: str,
     implementation_digest: str,
     market_data: VerifiedMarketData,
     corporate_actions: VerifiedCorporateActions,
@@ -776,6 +792,9 @@ def _identity_payload(
     assert action is not None
     return {
         "schema_version": RESEARCH_LOOP_SCHEMA_VERSION,
+        "git_head": git_head,
+        "preregistration_commit": preregistration_commit,
+        "preregistration_sha256": preregistration_sha256,
         "implementation_digest": implementation_digest,
         "input_digest": market_data.input_digest,
         "market_snapshot_id": market_data.provenance.snapshot_id,
@@ -800,8 +819,55 @@ def _identity_payload(
     }
 
 
+def _validate_preregistration(
+    content: bytes,
+    *,
+    config: ResearchLoopConfig,
+    simulation_start: date,
+    simulation_end: date,
+) -> str:
+    try:
+        preregistration = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ResearchLoopError(
+            "invalid_preregistration",
+            "preregistration must be valid UTF-8 JSON",
+        ) from exc
+    expected_parameters = {
+        "symbol": config.symbol,
+        "initial_cash_fen": config.initial_cash_fen,
+        "sma_period": config.sma_period,
+        "active_weight": str(config.active_weight),
+        "limits": {key: str(value) for key, value in asdict(config.limits).items()},
+    }
+    expected_period = {
+        "start": simulation_start.isoformat(),
+        "end": simulation_end.isoformat(),
+    }
+    if (
+        type(preregistration) is not dict
+        or type(preregistration.get("hypothesis")) is not str
+        or not preregistration["hypothesis"].strip()
+        or preregistration.get("universe") != [config.symbol]
+        or preregistration.get("evaluation_period") != expected_period
+        or preregistration.get("primary_metrics") != list(PREREGISTRATION_PRIMARY_METRICS)
+        or preregistration.get("benchmark") != "buy_and_hold"
+        or preregistration.get("pass_criteria") != PREREGISTRATION_PASS_CRITERIA
+        or preregistration.get("reject_criteria") != "otherwise"
+        or preregistration.get("strategy_parameters") != expected_parameters
+    ):
+        raise ResearchLoopError(
+            "preregistration_mismatch",
+            "preregistration must match the formal research definition and parameters",
+        )
+    return hashlib.sha256(content).hexdigest()
+
+
 def run_research_loop(
     *,
+    git_head: str,
+    preregistration_commit: str,
+    preregistration_content: bytes,
     config: ResearchLoopConfig,
     market_data: VerifiedMarketData,
     corporate_actions: VerifiedCorporateActions,
@@ -810,6 +876,19 @@ def run_research_loop(
     universe: VerifiedUniverse,
 ) -> ResearchLoopResult:
     """Run one deterministic verified SMA path and one buy-and-hold benchmark."""
+    if (
+        type(git_head) is not str
+        or len(git_head) != 40
+        or any(character not in "0123456789abcdef" for character in git_head)
+        or type(preregistration_commit) is not str
+        or len(preregistration_commit) != 40
+        or any(character not in "0123456789abcdef" for character in preregistration_commit)
+        or type(preregistration_content) is not bytes
+    ):
+        raise ResearchLoopError(
+            "invalid_provenance_identity",
+            "formal research provenance identity is invalid",
+        )
     instrument_kind, action_provenance = _validate_inputs(
         config=config,
         market_data=market_data,
@@ -820,6 +899,12 @@ def run_research_loop(
     )
     bars = _bar_map(market_data, corporate_actions)
     sessions, buffer_session = _validated_sessions(bars, calendar)
+    preregistration_sha256 = _validate_preregistration(
+        preregistration_content,
+        config=config,
+        simulation_start=sessions[0],
+        simulation_end=sessions[-1],
+    )
     strategy = _simulate_path(
         label="sma_planner",
         config=config,
@@ -844,6 +929,9 @@ def run_research_loop(
     )
     implementation_digest = _implementation_digest()
     identity = _identity_payload(
+        git_head=git_head,
+        preregistration_commit=preregistration_commit,
+        preregistration_sha256=preregistration_sha256,
         implementation_digest=implementation_digest,
         market_data=market_data,
         corporate_actions=corporate_actions,
@@ -861,6 +949,9 @@ def run_research_loop(
     return ResearchLoopResult(
         schema_version=RESEARCH_LOOP_SCHEMA_VERSION,
         run_id=run_id,
+        git_head=git_head,
+        preregistration_commit=preregistration_commit,
+        preregistration_sha256=preregistration_sha256,
         implementation_digest=implementation_digest,
         input_digest=market_data.input_digest,
         market_snapshot_id=market_data.provenance.snapshot_id,
